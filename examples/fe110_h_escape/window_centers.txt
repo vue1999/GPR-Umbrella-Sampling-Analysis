@@ -1,0 +1,33 @@
+# Window centres for Fe(110) H escape umbrella sampling
+# One centre per line, ordered by window index (0..28)
+# CV: minimum distance of H from Fe surface (nm)
+# Kappa: 24.305 eV/nm^2 (uniform for all windows)
+4.1011
+3.9756
+3.8264
+3.6841
+3.3975
+3.3855
+3.3721
+3.3328
+2.9983
+2.7534
+2.3889
+2.1139
+1.8390
+1.7446
+1.6499
+1.3764
+1.1029
+0.8294
+0.5559
+0.6927
+0.9662
+1.2397
+1.5132
+1.9765
+2.2514
+2.5712
+2.8759
+3.1656
+3.5408

@@ -1,0 +1,34 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "gpr-umbrella-1d"
+version = "0.1.0"
+description = "Gaussian process umbrella integration for 1D PLUMED umbrella sampling outputs."
+readme = "README.md"
+requires-python = ">=3.9"
+license = {text = "MIT"}
+authors = [
+  {name = "Eszter Varga-Umbrich"}
+]
+keywords = ["umbrella sampling", "gaussian process", "plumed", "pmf", "gpr"]
+classifiers = [
+  "Programming Language :: Python :: 3",
+  "License :: OSI Approved :: MIT License",
+  "Operating System :: OS Independent"
+]
+dependencies = [
+  "numpy>=1.23",
+  "scipy>=1.9",
+  "matplotlib>=3.7"
+]
+
+[project.scripts]
+gpr-umbrella = "gpr_umbrella_1d.cli:main"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
