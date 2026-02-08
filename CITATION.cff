@@ -1,8 +1,0 @@
-cff-version: 1.2.0
-message: "If you use this software, please cite it."
-title: "GPR Umbrella Integration (1D)"
-version: 0.1.0
-authors:
-  - family-names: "Varga-Umbrich"
-    given-names: "Eszter"
-license: MIT
