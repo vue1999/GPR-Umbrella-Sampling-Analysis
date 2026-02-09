@@ -108,7 +108,9 @@ python run_gpr.py
 ```
 
 ## Citation
-If you use this tool in published work, please cite the original GPR umbrella integration paper and acknowledge this implementation.
+
+If you use this tool in published work, please acknowledge this implementation.
 
 ## License
+
 MIT
