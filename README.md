@@ -4,12 +4,13 @@ Gaussian process regression (GPR) based umbrella integration for 1D PLUMED umbre
 "Free-energy surface reconstruction from umbrella samples using Gaussian process regression" and is tailored to PLUMED `window_*.ui_dat` files.
 
 ## Features
+
 - Computes mean force and uncertainty from umbrella windows
 - Estimates autocorrelation time for effective sample size
 - Optimizes GP hyperparameters by marginal likelihood
 - Produces PMF and derivative predictions with uncertainties
 - Generates a multi-panel diagnostics figure
-- **Reads raw PLUMED COLVAR files directly** (no preprocessing required)
+- Reads raw PLUMED COLVAR files directly (no preprocessing required)
 - Configurable units (energy, collective-variable axis)
 
 ## Installation
@@ -20,7 +21,7 @@ pip install -e .
 
 ## Quick Start
 
-### From COLVAR files (recommended)
+### From COLVAR files
 
 Supply a directory of `COLVAR_window_*.dat` files together with force-constant
 information.  For a single kappa shared across all windows, provide a centres
@@ -72,7 +73,8 @@ results = gpr_umbrella_integration(
 
 ## Input Data Formats
 
-### COLVAR files (preferred)
+### COLVAR files
+
 Standard PLUMED `COLVAR_window_*.dat` files with columns for `time` and the
 collective variable.  The CV column index can be set with `--cv-col` (default 1).
 
@@ -86,13 +88,16 @@ Force constant and window centres can be provided in two ways:
 By default, kappa is expected in eV/CV_unit².  Pass `--kappa-kj` if values are
 in kJ/mol/CV_unit² (PLUMED convention).
 
-### window_*.ui_dat files (legacy)
+### window_*.ui_dat files
+
 Each file must contain at least three numeric columns:
+
 1. reaction coordinate samples
 2. window centre (constant per file)
 3. force constant kappa in kJ/mol/CV_unit² (constant per file)
 
 ## Outputs
+
 - `*_pmf_gpr.dat`: reaction coordinate, PMF mean, PMF uncertainty
 - `*_deriv_gpr.dat`: reaction coordinate, mean force, mean force uncertainty
 - `*_gpr_analysis.png`: diagnostics figure
