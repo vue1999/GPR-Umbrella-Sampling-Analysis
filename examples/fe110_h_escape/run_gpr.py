@@ -1,4 +1,3 @@
-#!/usr/bin/env python
 """Example: Fe(110) H escape PMF from PLUMED umbrella sampling COLVAR files.
 
 This script uses the COLVAR-based loader with a single kappa value

@@ -4,7 +4,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 
 
-def apply_plot_style():
+def apply_plot_style() -> None:
     plt.rcParams.update({
         "figure.facecolor": "white",
         "axes.facecolor": "white",
@@ -21,7 +21,8 @@ def apply_plot_style():
     })
 
 
-def plot_diagnostics(results: dict, output_prefix: str | None = None):
+def plot_diagnostics(results: dict, output_prefix: str | None = None) -> plt.Figure:
+    """Create a 3x3 diagnostic figure for GPR umbrella integration results."""
     apply_plot_style()
 
     cv_unit = results.get("cv_unit", "nm")
@@ -47,35 +48,39 @@ def plot_diagnostics(results: dict, output_prefix: str | None = None):
     fig = plt.figure(figsize=(16, 10), constrained_layout=True)
     gs = fig.add_gridspec(3, 3)
 
+    # -- Panel 1: PMF --
     ax1 = fig.add_subplot(gs[0, 0])
-    ax1.plot(x_star, f_mean_diff, color="#1f77b4", linewidth=2, label="GP mean: Delta F(x)")
+    ax1.plot(x_star, f_mean_diff, color="#1f77b4", linewidth=2, label="GP mean: \u0394F(x)")
     ax1.fill_between(x_star, f_mean_diff - 2 * std_diff, f_mean_diff + 2 * std_diff,
-                     alpha=0.25, color="#1f77b4", label="plus/minus 2 sigma")
+                     alpha=0.25, color="#1f77b4", label="\u00b12\u03c3")
     ax1.set_xlabel(f"Reaction Coordinate ({cv_unit})")
-    ax1.set_ylabel(f"Delta F ({energy_unit})")
+    ax1.set_ylabel(f"\u0394F ({energy_unit})")
     ax1.set_title("PMF")
     ax1.legend(loc="best")
 
+    # -- Panel 2: Mean Force --
     ax2 = fig.add_subplot(gs[0, 1])
     ax2.plot(x_star, deriv_mean_star, color="#ff7f0e", linewidth=2, label="GP mean: dF/dx")
     ax2.fill_between(x_star, deriv_mean_star - 2 * deriv_std, deriv_mean_star + 2 * deriv_std,
-                     alpha=0.25, color="#ff7f0e", label="plus/minus 2 sigma")
+                     alpha=0.25, color="#ff7f0e", label="\u00b12\u03c3")
     ax2.errorbar(x_train, y, yerr=2 * derivative_errors, fmt="o", color="black", markersize=4,
-                 alpha=0.6, label="UI estimates plus/minus 2 sigma")
+                 alpha=0.6, label="UI estimates \u00b12\u03c3")
     ax2.set_xlabel(f"Reaction Coordinate ({cv_unit})")
     ax2.set_ylabel(f"dF/dx ({deriv_unit})")
     ax2.set_title("Mean Force")
     ax2.legend(loc="best")
 
+    # -- Panel 3: Position Sampling --
     ax3 = fig.add_subplot(gs[0, 2])
     ax3.errorbar(x_train, x_means, yerr=2 * np.sqrt(x_vars / n_samples), fmt="o",
-                 alpha=0.6, markersize=4, label="Mean position plus/minus 2 sigma")
-    ax3.plot(x_train, x_train, linestyle="--", color="black", alpha=0.5, label="Window centers")
-    ax3.set_xlabel(f"Window Center ({cv_unit})")
+                 alpha=0.6, markersize=4, label="Mean position \u00b12\u03c3")
+    ax3.plot(x_train, x_train, linestyle="--", color="black", alpha=0.5, label="Window centres")
+    ax3.set_xlabel(f"Window Centre ({cv_unit})")
     ax3.set_ylabel(f"Mean Position ({cv_unit})")
     ax3.set_title("Position Sampling")
     ax3.legend(loc="best")
 
+    # -- Panel 4: Derivative Error per Window --
     ax4 = fig.add_subplot(gs[1, 0])
     ax4.bar(np.arange(len(x_train)), derivative_errors, alpha=0.7, color="#2ca02c")
     ax4.axhline(derivative_errors.mean(), color="red", linestyle="--",
@@ -85,15 +90,17 @@ def plot_diagnostics(results: dict, output_prefix: str | None = None):
     ax4.set_title("Derivative Error per Window")
     ax4.legend(loc="best")
 
+    # -- Panel 5: Training Residuals --
     ax5 = fig.add_subplot(gs[1, 1])
     ax5.bar(np.arange(len(std_residuals)), std_residuals, alpha=0.7, color="#d62728")
     ax5.axhline(0, color="black", linewidth=1)
     ax5.axhline(2, color="red", linestyle="--", alpha=0.5)
     ax5.axhline(-2, color="red", linestyle="--", alpha=0.5)
     ax5.set_xlabel("Window Index")
-    ax5.set_ylabel("Standardized Residual")
+    ax5.set_ylabel("Standardised Residual")
     ax5.set_title(f"Training Residuals (std={std_residuals.std():.2f})")
 
+    # -- Panel 6: LOO Cross-Validation --
     ax6 = fig.add_subplot(gs[1, 2])
     ax6.bar(np.arange(len(loo_z)), loo_z, alpha=0.7, color="#9467bd")
     ax6.axhline(0, color="black", linewidth=1)
@@ -103,6 +110,7 @@ def plot_diagnostics(results: dict, output_prefix: str | None = None):
     ax6.set_ylabel("LOO Z-score")
     ax6.set_title(f"LOO Cross-Validation (std={loo_z.std():.2f})")
 
+    # -- Panel 7: LOO Z-score Histogram --
     ax7 = fig.add_subplot(gs[2, 0])
     ax7.hist(loo_z, bins=15, density=True, alpha=0.6, color="#9467bd", label="LOO z-scores")
     x_norm = np.linspace(-4, 4, 100)
@@ -113,15 +121,17 @@ def plot_diagnostics(results: dict, output_prefix: str | None = None):
     ax7.set_title("LOO Z-score Distribution")
     ax7.legend(loc="best")
 
+    # -- Panel 8: Autocorrelation Time --
     ax8 = fig.add_subplot(gs[2, 1])
     ax8.bar(np.arange(len(tau_ints)), tau_ints, alpha=0.7, color="#8c564b")
     ax8.axhline(tau_ints.mean(), color="red", linestyle="--",
                 label=f"Mean: {tau_ints.mean():.1f}")
     ax8.set_xlabel("Window Index")
-    ax8.set_ylabel("tau_int")
+    ax8.set_ylabel("\u03c4_int")
     ax8.set_title("Autocorrelation Time per Window")
     ax8.legend(loc="best")
 
+    # -- Panel 9: Summary Text --
     ax9 = fig.add_subplot(gs[2, 2])
     ax9.axis("off")
     summary_text = (
@@ -133,10 +143,10 @@ def plot_diagnostics(results: dict, output_prefix: str | None = None):
         f"Signal std sigma_f: {results['sigma_f']:.4f} {energy_unit}\n"
         f"Lengthscale ell: {results['lengthscale']:.4f} {cv_unit}\n\n"
         f"Mean PMF uncertainty: {std_diff.mean():.4f} {energy_unit}\n"
-        f"Mean derivative uncertainty: {deriv_std.mean():.4f} {deriv_unit}\n\n"
+        f"Mean deriv uncertainty: {deriv_std.mean():.4f} {deriv_unit}\n\n"
         f"Training residual std: {std_residuals.std():.2f}\n"
         f"LOO z-score std: {loo_z.std():.2f} (target: 1.0)\n"
-        f"LOO outside +/-2 sigma: {100 * np.mean(np.abs(loo_z) > 2):.1f}%\n"
+        f"LOO outside \u00b12\u03c3: {100 * np.mean(np.abs(loo_z) > 2):.1f}%\n"
     )
     ax9.text(0.05, 0.95, summary_text, transform=ax9.transAxes, fontsize=9,
              verticalalignment="top", family="monospace",

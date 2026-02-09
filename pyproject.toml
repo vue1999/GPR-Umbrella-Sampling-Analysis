@@ -27,8 +27,14 @@ dependencies = [
 [project.scripts]
 gpr-umbrella = "gpr_umbrella_1d.cli:main"
 
+[project.optional-dependencies]
+test = ["pytest>=7"]
+
 [tool.setuptools]
 package-dir = {"" = "src"}
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
