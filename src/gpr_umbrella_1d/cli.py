@@ -37,6 +37,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--output-dir", default=None, help="Directory for outputs (default: parent of data folder)")
     parser.add_argument("--output-prefix", default=None, help="Prefix for output files")
     parser.add_argument("--no-optimize", action="store_true", help="Skip hyperparameter optimisation")
+    parser.add_argument("--lengthscale", type=float, default=None,
+                        help="Fix the GP lengthscale (ell) instead of optimising it")
+    parser.add_argument("--sigma-f", type=float, default=None,
+                        help="Fix the GP signal variance (sigma_f) instead of optimising it")
     parser.add_argument("--max-lag", type=int, default=1000, help="Max lag for autocorrelation")
     parser.add_argument("--acf-threshold", type=float, default=0.05, help="ACF cutoff for tau_int integration")
     parser.add_argument("--n-star", type=int, default=200, help="Number of prediction points")
@@ -67,6 +71,8 @@ def main() -> int:
             output_prefix=args.output_prefix,
             output_dir=args.output_dir,
             optimize_hyperparams=not args.no_optimize,
+            fixed_lengthscale=args.lengthscale,
+            fixed_sigma_f=args.sigma_f,
             max_lag=args.max_lag,
             acf_threshold=args.acf_threshold,
             n_star=args.n_star,

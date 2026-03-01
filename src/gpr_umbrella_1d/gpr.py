@@ -378,6 +378,8 @@ def gpr_umbrella_integration(
     output_prefix: str | None = None,
     output_dir: str | None = None,
     optimize_hyperparams: bool = True,
+    fixed_lengthscale: float | None = None,
+    fixed_sigma_f: float | None = None,
     max_lag: int = 1000,
     acf_threshold: float = 0.05,
     n_star: int = 200,
@@ -507,7 +509,71 @@ def gpr_umbrella_integration(
         deriv_std_val = 1e-6
     sigma_f_init = ell_init * deriv_std_val
 
-    if optimize_hyperparams:
+    # --- Handle fixed hyperparameters ---
+    if fixed_lengthscale is not None and fixed_sigma_f is not None:
+        # Both fixed: skip optimisation entirely
+        ell_opt = fixed_lengthscale
+        sigma_f_opt = fixed_sigma_f
+        if verbose:
+            print(f"   Using FIXED lengthscale = {ell_opt:.4f} {cv_unit}")
+            print(f"   Using FIXED sigma_f = {sigma_f_opt:.4f} {energy_unit}")
+    elif fixed_lengthscale is not None and optimize_hyperparams:
+        # Lengthscale fixed, optimise sigma_f via 1-D grid search
+        ell_opt = fixed_lengthscale
+        if verbose:
+            print(f"   Using FIXED lengthscale = {ell_opt:.4f} {cv_unit}")
+            print(f"   Optimising sigma_f with fixed lengthscale...")
+
+        best_nll = np.inf
+        best_sf = sigma_f_init
+        for sf_try in np.logspace(np.log10(max(sigma_f_init * 0.01, 1e-4)),
+                                  np.log10(max(sigma_f_init * 100, 10.0)), 200):
+            nll = neg_log_marginal_likelihood(
+                np.array([sf_try, ell_opt]),
+                x_centers, derivatives, derivative_errors_stat,
+            )
+            if nll < best_nll:
+                best_nll = nll
+                best_sf = sf_try
+
+        # Polish with L-BFGS-B (1-D wrapper)
+        def _nll_sf_only(params):
+            return neg_log_marginal_likelihood(
+                np.array([params[0], ell_opt]),
+                x_centers, derivatives, derivative_errors_stat,
+            )
+
+        res = minimize(_nll_sf_only, x0=[best_sf],
+                       method="L-BFGS-B", bounds=[(1e-4, 100.0)])
+        sigma_f_opt = float(res.x[0]) if res.success else best_sf
+    elif fixed_sigma_f is not None and optimize_hyperparams:
+        # sigma_f fixed, optimise lengthscale via 1-D grid search
+        sigma_f_opt = fixed_sigma_f
+        if verbose:
+            print(f"   Using FIXED sigma_f = {sigma_f_opt:.4f} {energy_unit}")
+            print(f"   Optimising lengthscale with fixed sigma_f...")
+
+        best_nll = np.inf
+        best_ell = ell_init
+        for ell_try in np.logspace(np.log10(0.02), np.log10(ell_upper), 200):
+            nll = neg_log_marginal_likelihood(
+                np.array([sigma_f_opt, ell_try]),
+                x_centers, derivatives, derivative_errors_stat,
+            )
+            if nll < best_nll:
+                best_nll = nll
+                best_ell = ell_try
+
+        def _nll_ell_only(params):
+            return neg_log_marginal_likelihood(
+                np.array([sigma_f_opt, params[0]]),
+                x_centers, derivatives, derivative_errors_stat,
+            )
+
+        res = minimize(_nll_ell_only, x0=[best_ell],
+                       method="L-BFGS-B", bounds=[(0.02, ell_upper)])
+        ell_opt = float(res.x[0]) if res.success else best_ell
+    elif optimize_hyperparams:
         bounds = [(0.001, 100.0), (0.02, ell_upper)]
 
         # Multi-start optimisation for robustness
@@ -693,14 +759,18 @@ def gpr_umbrella_integration(
         pmf_path = os.path.join(output_dir, f"{output_prefix}_pmf_gpr.dat")
         deriv_path = os.path.join(output_dir, f"{output_prefix}_deriv_gpr.dat")
 
+        hp_header = (f"sigma_f={sigma_f_opt:.6f} {energy_unit}  "
+                     f"lengthscale={ell_opt:.6f} {cv_unit}")
         np.savetxt(
             pmf_path, pmf_data,
-            header=f"x({cv_unit}) PMF({energy_unit}) uncertainty({energy_unit})",
+            header=(f"x({cv_unit}) PMF({energy_unit}) uncertainty({energy_unit})\n"
+                    f"# {hp_header}"),
             fmt="%.6f",
         )
         np.savetxt(
             deriv_path, deriv_data,
-            header=f"x({cv_unit}) dF/dx({deriv_unit}) uncertainty({deriv_unit})",
+            header=(f"x({cv_unit}) dF/dx({deriv_unit}) uncertainty({deriv_unit})\n"
+                    f"# {hp_header}"),
             fmt="%.6f",
         )
 
