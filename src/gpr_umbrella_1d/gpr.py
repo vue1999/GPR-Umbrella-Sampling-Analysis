@@ -362,6 +362,107 @@ def leave_one_out_cv(
 
 
 # ---------------------------------------------------------------------------
+# Hyperparameter fitting
+# ---------------------------------------------------------------------------
+
+def _grid_then_polish(nll_1d, init: float, bounds: tuple[float, float],
+                      log_lo: float, log_hi: float, n_grid: int = 200) -> float:
+    """Coarse log-spaced grid search followed by L-BFGS-B polish for a 1-D NLL."""
+    grid = np.logspace(log_lo, log_hi, n_grid)
+    best_x, best_nll = float(init), np.inf
+    for x_try in grid:
+        nll = nll_1d(float(x_try))
+        if nll < best_nll:
+            best_nll, best_x = nll, float(x_try)
+    res = minimize(lambda p: nll_1d(float(p[0])),
+                   x0=[best_x], method="L-BFGS-B", bounds=[bounds])
+    return float(res.x[0]) if res.success else best_x
+
+
+def _fit_hyperparameters(
+    x_centers: np.ndarray,
+    derivatives: np.ndarray,
+    derivative_errors: np.ndarray,
+    sigma_f_init: float,
+    ell_init: float,
+    ell_upper: float,
+    cv_range: float,
+    fixed_sigma_f: float | None,
+    fixed_lengthscale: float | None,
+    optimize: bool,
+) -> tuple[float, float, bool]:
+    """Choose (sigma_f, ell) according to which parameters are fixed.
+
+    Returns
+    -------
+    (sigma_f, ell, ok)
+        ``ok`` is False only when a joint 2-D optimisation failed for every
+        starting point; callers may emit a warning.
+    """
+    # Both fixed → nothing to do
+    if fixed_sigma_f is not None and fixed_lengthscale is not None:
+        return fixed_sigma_f, fixed_lengthscale, True
+
+    # No optimisation requested → return initial estimates (respecting fixes)
+    if not optimize:
+        return (fixed_sigma_f if fixed_sigma_f is not None else sigma_f_init,
+                fixed_lengthscale if fixed_lengthscale is not None else ell_init,
+                True)
+
+    # Lengthscale fixed → 1-D search over sigma_f
+    if fixed_lengthscale is not None:
+        ell = fixed_lengthscale
+        def nll_sf(sf: float) -> float:
+            return neg_log_marginal_likelihood(
+                np.array([sf, ell]), x_centers, derivatives, derivative_errors,
+            )
+        sigma_f = _grid_then_polish(
+            nll_sf, init=sigma_f_init, bounds=(1e-4, 100.0),
+            log_lo=np.log10(max(sigma_f_init * 0.01, 1e-4)),
+            log_hi=np.log10(max(sigma_f_init * 100, 10.0)),
+        )
+        return sigma_f, ell, True
+
+    # sigma_f fixed → 1-D search over ell
+    if fixed_sigma_f is not None:
+        sigma_f = fixed_sigma_f
+        def nll_ell(ell: float) -> float:
+            return neg_log_marginal_likelihood(
+                np.array([sigma_f, ell]), x_centers, derivatives, derivative_errors,
+            )
+        ell = _grid_then_polish(
+            nll_ell, init=ell_init, bounds=(0.02, ell_upper),
+            log_lo=np.log10(0.02), log_hi=np.log10(ell_upper),
+        )
+        return sigma_f, ell, True
+
+    # Joint 2-D optimisation, multi-start
+    bounds = [(0.001, 100.0), (0.02, ell_upper)]
+    starting_points = [
+        [sigma_f_init, ell_init],
+        [0.5 * sigma_f_init, 0.5 * ell_init],
+        [2.0 * sigma_f_init, 2.0 * ell_init],
+        [sigma_f_init, 0.5 * cv_range],
+        [0.1, 1.0],
+    ]
+    best_params, best_nll = (sigma_f_init, ell_init), np.inf
+    for x0 in starting_points:
+        x0 = [np.clip(x0[0], *bounds[0]), np.clip(x0[1], *bounds[1])]
+        result = minimize(
+            neg_log_marginal_likelihood, x0=x0,
+            args=(x_centers, derivatives, derivative_errors),
+            method="L-BFGS-B", bounds=bounds,
+        )
+        if result.success and result.fun < best_nll:
+            best_nll = result.fun
+            best_params = tuple(result.x)
+
+    if best_nll < np.inf:
+        return best_params[0], best_params[1], True
+    return sigma_f_init, ell_init, False
+
+
+# ---------------------------------------------------------------------------
 # Main entry point
 # ---------------------------------------------------------------------------
 
@@ -509,115 +610,32 @@ def gpr_umbrella_integration(
         deriv_std_val = 1e-6
     sigma_f_init = ell_init * deriv_std_val
 
-    # --- Handle fixed hyperparameters ---
-    if fixed_lengthscale is not None and fixed_sigma_f is not None:
-        # Both fixed: skip optimisation entirely
-        ell_opt = fixed_lengthscale
-        sigma_f_opt = fixed_sigma_f
+    if verbose:
+        if fixed_lengthscale is not None:
+            print(f"   Using FIXED lengthscale = {fixed_lengthscale:.4f} {cv_unit}")
+        if fixed_sigma_f is not None:
+            print(f"   Using FIXED sigma_f = {fixed_sigma_f:.4f} {energy_unit}")
+
+    sigma_f_opt, ell_opt, fit_ok = _fit_hyperparameters(
+        x_centers=x_centers,
+        derivatives=derivatives,
+        derivative_errors=derivative_errors_stat,
+        sigma_f_init=sigma_f_init,
+        ell_init=ell_init,
+        ell_upper=ell_upper,
+        cv_range=cv_range,
+        fixed_sigma_f=fixed_sigma_f,
+        fixed_lengthscale=fixed_lengthscale,
+        optimize=optimize_hyperparams,
+    )
+    if not fit_ok:
+        warnings.warn(
+            "Hyperparameter optimisation failed for all starting points; "
+            "falling back to initial estimates.  Results may be unreliable.",
+            stacklevel=2,
+        )
         if verbose:
-            print(f"   Using FIXED lengthscale = {ell_opt:.4f} {cv_unit}")
-            print(f"   Using FIXED sigma_f = {sigma_f_opt:.4f} {energy_unit}")
-    elif fixed_lengthscale is not None and optimize_hyperparams:
-        # Lengthscale fixed, optimise sigma_f via 1-D grid search
-        ell_opt = fixed_lengthscale
-        if verbose:
-            print(f"   Using FIXED lengthscale = {ell_opt:.4f} {cv_unit}")
-            print(f"   Optimising sigma_f with fixed lengthscale...")
-
-        best_nll = np.inf
-        best_sf = sigma_f_init
-        for sf_try in np.logspace(np.log10(max(sigma_f_init * 0.01, 1e-4)),
-                                  np.log10(max(sigma_f_init * 100, 10.0)), 200):
-            nll = neg_log_marginal_likelihood(
-                np.array([sf_try, ell_opt]),
-                x_centers, derivatives, derivative_errors_stat,
-            )
-            if nll < best_nll:
-                best_nll = nll
-                best_sf = sf_try
-
-        # Polish with L-BFGS-B (1-D wrapper)
-        def _nll_sf_only(params):
-            return neg_log_marginal_likelihood(
-                np.array([params[0], ell_opt]),
-                x_centers, derivatives, derivative_errors_stat,
-            )
-
-        res = minimize(_nll_sf_only, x0=[best_sf],
-                       method="L-BFGS-B", bounds=[(1e-4, 100.0)])
-        sigma_f_opt = float(res.x[0]) if res.success else best_sf
-    elif fixed_sigma_f is not None and optimize_hyperparams:
-        # sigma_f fixed, optimise lengthscale via 1-D grid search
-        sigma_f_opt = fixed_sigma_f
-        if verbose:
-            print(f"   Using FIXED sigma_f = {sigma_f_opt:.4f} {energy_unit}")
-            print(f"   Optimising lengthscale with fixed sigma_f...")
-
-        best_nll = np.inf
-        best_ell = ell_init
-        for ell_try in np.logspace(np.log10(0.02), np.log10(ell_upper), 200):
-            nll = neg_log_marginal_likelihood(
-                np.array([sigma_f_opt, ell_try]),
-                x_centers, derivatives, derivative_errors_stat,
-            )
-            if nll < best_nll:
-                best_nll = nll
-                best_ell = ell_try
-
-        def _nll_ell_only(params):
-            return neg_log_marginal_likelihood(
-                np.array([sigma_f_opt, params[0]]),
-                x_centers, derivatives, derivative_errors_stat,
-            )
-
-        res = minimize(_nll_ell_only, x0=[best_ell],
-                       method="L-BFGS-B", bounds=[(0.02, ell_upper)])
-        ell_opt = float(res.x[0]) if res.success else best_ell
-    elif optimize_hyperparams:
-        bounds = [(0.001, 100.0), (0.02, ell_upper)]
-
-        # Multi-start optimisation for robustness
-        best_nll = np.inf
-        best_params = (sigma_f_init, ell_init)
-
-        starting_points = [
-            [sigma_f_init, ell_init],
-            [0.5 * sigma_f_init, 0.5 * ell_init],
-            [2.0 * sigma_f_init, 2.0 * ell_init],
-            [sigma_f_init, 0.5 * cv_range],
-            [0.1, 1.0],
-        ]
-
-        for x0 in starting_points:
-            # Clamp to bounds
-            x0 = [
-                np.clip(x0[0], bounds[0][0], bounds[0][1]),
-                np.clip(x0[1], bounds[1][0], bounds[1][1]),
-            ]
-            result = minimize(
-                neg_log_marginal_likelihood,
-                x0=x0,
-                args=(x_centers, derivatives, derivative_errors_stat),
-                method="L-BFGS-B",
-                bounds=bounds,
-            )
-            if result.success and result.fun < best_nll:
-                best_nll = result.fun
-                best_params = tuple(result.x)
-
-        if best_nll < np.inf:
-            sigma_f_opt, ell_opt = best_params
-        else:
-            sigma_f_opt, ell_opt = sigma_f_init, ell_init
-            warnings.warn(
-                "Hyperparameter optimisation failed for all starting points; "
-                "falling back to initial estimates.  Results may be unreliable.",
-                stacklevel=2,
-            )
-            if verbose:
-                print(f"\n   WARNING: Hyperparameter optimisation failed, using initial estimates")
-    else:
-        sigma_f_opt, ell_opt = sigma_f_init, ell_init
+            print("\n   WARNING: Hyperparameter optimisation failed, using initial estimates")
 
     derivative_errors = np.where(derivative_errors_stat > 0, derivative_errors_stat, 1e-12)
 
