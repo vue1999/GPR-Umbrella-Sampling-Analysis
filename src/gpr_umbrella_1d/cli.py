@@ -46,6 +46,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--n-star", type=int, default=200, help="Number of prediction points")
     parser.add_argument("--no-plot", action="store_true", help="Skip diagnostic plot")
     parser.add_argument("--no-save", action="store_true", help="Do not save PMF/derivative outputs")
+    parser.add_argument("--no-calibrate", action="store_true",
+                        help="Do not rescale GP uncertainties by the LOO z-score std "
+                             "(calibration is on by default)")
     parser.add_argument("--show", action="store_true", help="Show figure window")
     parser.add_argument("--fig-dpi", type=int, default=150, help="Figure DPI")
     parser.add_argument("--fig-path", default=None, help="Explicit path to save figure")
@@ -82,6 +85,7 @@ def main() -> int:
             figure_dpi=args.fig_dpi,
             figure_path=args.fig_path,
             save_outputs=not args.no_save,
+            calibrate_uncertainty=not args.no_calibrate,
             verbose=not args.quiet,
         )
     except (ValueError, FileNotFoundError, OSError) as exc:

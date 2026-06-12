@@ -1,7 +1,15 @@
 # GPR Umbrella Integration (1D)
 
-Gaussian process regression (GPR) based umbrella integration for 1D PLUMED umbrella sampling outputs. This package implements the method in
-"Free-energy surface reconstruction from umbrella samples using Gaussian process regression" and is tailored to PLUMED `window_*.ui_dat` files.
+Gaussian process regression (GPR) based umbrella integration for 1D PLUMED umbrella sampling outputs. This package implements the method described in
+
+> T. Stecher, N. Bernstein, and G. Csányi, "Free Energy Surface Reconstruction from Umbrella Samples Using Gaussian Process Regression," *J. Chem. Theory Comput.* **2014**, *10* (9), 4079–4097. [doi:10.1021/ct500438v](https://doi.org/10.1021/ct500438v)
+
+and is tailored to PLUMED `window_*.ui_dat` files. Specifically, it implements the
+gradient-based reconstruction variant referred to as **GPR(d)** in that paper:
+mean forces are estimated per umbrella window (Sec. 2.3, eq 15), their statistical
+noise is propagated into the likelihood (Sec. 4, eq 37), and the free-energy profile
+is reconstructed by GPR on the derivative observations using a (periodic) squared-exponential
+kernel (Sec. 4–4.1).
 
 ## Features
 
@@ -114,4 +122,15 @@ python run_gpr.py
 
 ## Citation
 
-If you use this tool in published work, please acknowledge this implementation.
+This implementation is based on the method introduced in:
+
+> T. Stecher, N. Bernstein, and G. Csányi, "Free Energy Surface Reconstruction from Umbrella Samples Using Gaussian Process Regression," *J. Chem. Theory Comput.* **2014**, *10* (9), 4079–4097. [doi:10.1021/ct500438v](https://doi.org/10.1021/ct500438v)
+
+If you use this tool in published work, please cite the paper above and acknowledge
+this implementation.
+
+A closely related follow-up paper extends the same GPR-based reconstruction to combined
+exploration + sampling (metadynamics biasing with an instantaneous-collective-force
+gradient estimator, reconstructed with GPR):
+
+> L. Mones, N. Bernstein, and G. Csányi, "Exploration, Sampling, And Reconstruction of Free Energy Surfaces with Gaussian Process Regression," *J. Chem. Theory Comput.* **2016**, *12* (10), 5100–5110. [doi:10.1021/acs.jctc.6b00553](https://doi.org/10.1021/acs.jctc.6b00553)

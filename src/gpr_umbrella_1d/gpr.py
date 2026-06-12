@@ -490,6 +490,7 @@ def gpr_umbrella_integration(
     figure_dpi: int = 150,
     figure_path: str | None = None,
     save_outputs: bool = True,
+    calibrate_uncertainty: bool = True,
     verbose: bool = True,
 ):
     """Run GPR umbrella integration.
@@ -715,6 +716,27 @@ def gpr_umbrella_integration(
         print(f"   Percent outside \u00b12 sigma: {100 * np.mean(np.abs(loo_z) > 2):.1f}%")
         print(f"   Percent outside \u00b13 sigma: {100 * np.mean(np.abs(loo_z) > 3):.1f}%")
 
+    # ------------------------------------------------------------------
+    # Post-hoc uncertainty calibration via the LOO z-score std.
+    # The GP's predictive std is multiplied by std(LOO z) so that the
+    # \u00b1\u03c3 bands have nominal 68% coverage on this dataset.  LOO and
+    # training-residual diagnostics intentionally stay on the raw GP
+    # so the histogram still tells the calibration story.
+    # ------------------------------------------------------------------
+    cal_factor: float | None = None
+    if calibrate_uncertainty:
+        z_std = float(loo_z.std())
+        if np.isfinite(z_std) and z_std > 0:
+            cal_factor = z_std
+            std_diff   = std_diff   * cal_factor
+            f_std      = f_std      * cal_factor
+            deriv_std  = deriv_std  * cal_factor
+            step += 1
+            if verbose:
+                print(f"\n{step}. UNCERTAINTY CALIBRATION")
+                print(f"   LOO z-score std: {cal_factor:.3f}")
+                print(f"   PMF and dF/dx uncertainties rescaled by this factor.")
+
     results = {
         "x_centers": x_centers,
         "x_means": x_means,
@@ -744,6 +766,7 @@ def gpr_umbrella_integration(
         "loo_means": loo_means,
         "loo_stds": loo_stds,
         "loo_z": loo_z,
+        "uncertainty_calibration_factor": cal_factor,
     }
 
     fig_path = None
@@ -779,6 +802,8 @@ def gpr_umbrella_integration(
 
         hp_header = (f"sigma_f={sigma_f_opt:.6f} {energy_unit}  "
                      f"lengthscale={ell_opt:.6f} {cv_unit}")
+        if cal_factor is not None:
+            hp_header += f"  uncertainty_calibration={cal_factor:.4f}"
         np.savetxt(
             pmf_path, pmf_data,
             header=(f"x({cv_unit}) PMF({energy_unit}) uncertainty({energy_unit})\n"

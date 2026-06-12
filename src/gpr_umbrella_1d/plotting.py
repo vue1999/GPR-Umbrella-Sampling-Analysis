@@ -111,6 +111,13 @@ def plot_diagnostics(results: dict, output_prefix: str | None = None) -> plt.Fig
     ax.set_ylabel(f"ΔF ({energy_unit})")
     ax.set_title("Free-energy profile")
     ax.legend(loc="best")
+    # Surface the largest PMF uncertainty in-panel rather than in a stats strip.
+    ax.text(0.97, 0.04,
+            f"max σ[ΔF] = {std_diff.max():.3g} {energy_unit}",
+            transform=ax.transAxes, ha="right", va="bottom",
+            fontsize=8.5, color="#333333",
+            bbox=dict(boxstyle="round,pad=0.3", facecolor="white",
+                      edgecolor="#cccccc", alpha=0.9))
 
     # Mean force --------------------------------------------------------
     ax = fig.add_subplot(gs[0, 1])
@@ -127,21 +134,35 @@ def plot_diagnostics(results: dict, output_prefix: str | None = None) -> plt.Fig
     ax.set_ylabel(f"dF/dx ({deriv_unit})")
     ax.set_title("Mean force")
     ax.legend(loc="best")
+    # GP hyperparameters live with the panel they shape.
+    ax.text(0.97, 0.04,
+            f"σ_f = {results['sigma_f']:.3g} {energy_unit}\n"
+            f"ℓ = {results['lengthscale']:.3g} {cv_unit}",
+            transform=ax.transAxes, ha="right", va="bottom",
+            fontsize=8.5, color="#333333",
+            bbox=dict(boxstyle="round,pad=0.3", facecolor="white",
+                      edgecolor="#cccccc", alpha=0.9))
 
-    # Sampling deviation -----------------------------------------------
-    # Show (mean position − window centre) so any bias is immediately visible
-    # instead of being squashed against a y=x identity line.
+    # Mean position vs window centre ----------------------------------
+    # Sampling diagnostic: each point is the mean CV value sampled in a
+    # window plotted against where the umbrella was centred.  Points on
+    # the dashed y = x line mean the umbrella held the system at its
+    # nominal centre; vertical departures show biased sampling, which is
+    # what propagates into the dF/dx estimate.
     ax = fig.add_subplot(gs[0, 2])
     sample_se = np.sqrt(x_vars / n_samples)
-    deviation = x_means - x_train
-    ax.errorbar(x_train, deviation, yerr=2 * sample_se,
-                fmt="o", markersize=3.5, color=PALETTE["sampling"],
+    rc_lo, rc_hi = x_train.min(), x_train.max()
+    pad = 0.03 * (rc_hi - rc_lo) if rc_hi > rc_lo else 0.1
+    ref = np.array([rc_lo - pad, rc_hi + pad])
+    ax.plot(ref, ref, linestyle="--", color=PALETTE["guide"],
+            linewidth=0.9, alpha=0.7, label="x = window centre")
+    ax.errorbar(x_train, x_means, yerr=2 * sample_se, fmt="o",
+                markersize=3.8, color=PALETTE["sampling"],
                 ecolor=PALETTE["sampling"], elinewidth=0.8, capsize=0,
-                alpha=0.9, label="⟨x⟩ − xₜ  (±2 SE)")
-    ax.axhline(0, color=PALETTE["guide"], linestyle="--", linewidth=0.9, alpha=0.7)
+                alpha=0.9, label=f"⟨x⟩ ± 2 SE")
     ax.set_xlabel(f"Window centre ({cv_unit})")
-    ax.set_ylabel(f"Sampling bias ({cv_unit})")
-    ax.set_title("Window sampling deviation")
+    ax.set_ylabel(f"Mean sampled position ({cv_unit})")
+    ax.set_title("Window sampling check")
     ax.legend(loc="best")
 
     # Per-window derivative error --------------------------------------
@@ -215,25 +236,25 @@ def plot_diagnostics(results: dict, output_prefix: str | None = None) -> plt.Fig
     _integer_xaxis(ax)
 
     # ------------------------------------------------------------------
-    # Title strip with key summary statistics
+    # Title block — basic run context only.  Quantitative stats sit on
+    # the panel they describe.
     # ------------------------------------------------------------------
     title = "GPR umbrella integration"
     if output_prefix:
         title = f"{title} — {output_prefix}"
 
-    summary = (
-        f"{len(x_train)} windows  |  "
-        f"RC ∈ [{x_train.min():.3f}, {x_train.max():.3f}] {cv_unit}  |  "
-        f"⟨κ⟩ = {results['kappa'].mean():.3g} {kappa_unit}  |  "
-        f"σ_f = {results['sigma_f']:.3g} {energy_unit}  |  "
-        f"ℓ = {results['lengthscale']:.3g} {cv_unit}  |  "
-        f"max ±ΔF unc. = {std_diff.max():.3g} {energy_unit}  |  "
-        f"LOO z std = {loo_z.std():.2f}"
+    setup = (
+        f"{len(x_train)} windows, "
+        f"reaction coordinate {x_train.min():.3g}–{x_train.max():.3g} {cv_unit}, "
+        f"mean force constant κ = {results['kappa'].mean():.3g} {kappa_unit}"
     )
+    cal = results.get("uncertainty_calibration_factor")
+    if cal is not None:
+        setup += f"  ·  uncertainties calibrated ×{cal:.2f}"
 
     fig.text(0.5, 0.965, title, ha="center", va="top",
              fontsize=13, fontweight="bold")
-    fig.text(0.5, 0.925, summary, ha="center", va="top",
-             fontsize=9, color="#333333")
+    fig.text(0.5, 0.928, setup, ha="center", va="top",
+             fontsize=9.5, color="#333333")
 
     return fig
