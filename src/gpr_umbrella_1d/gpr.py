@@ -723,6 +723,11 @@ def gpr_umbrella_integration(
     # training-residual diagnostics intentionally stay on the raw GP
     # so the histogram still tells the calibration story.
     # ------------------------------------------------------------------
+    # Keep the raw GP uncertainties so plotting can show calibration impact.
+    std_diff_raw  = std_diff.copy()
+    f_std_raw     = f_std.copy()
+    deriv_std_raw = deriv_std.copy()
+
     cal_factor: float | None = None
     if calibrate_uncertainty:
         z_std = float(loo_z.std())
@@ -767,6 +772,10 @@ def gpr_umbrella_integration(
         "loo_stds": loo_stds,
         "loo_z": loo_z,
         "uncertainty_calibration_factor": cal_factor,
+        "all_positions": all_positions,
+        "pmf_std_raw": std_diff_raw,
+        "pmf_f_std_raw": f_std_raw,
+        "deriv_std_raw": deriv_std_raw,
     }
 
     fig_path = None
