@@ -26,6 +26,7 @@ dependencies = [
 
 [project.scripts]
 gpr-umbrella = "gpr_umbrella_1d.cli:main"
+gpr-umbrella-2d = "gpr_umbrella_1d.cli2d:main"
 
 [project.optional-dependencies]
 test = ["pytest>=7"]

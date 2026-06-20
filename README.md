@@ -121,6 +121,47 @@ cd examples/fe_h_desorption
 python run_gpr.py
 ```
 
+## 2D umbrella integration (`multiD` branch)
+
+`gpr_umbrella_1d.gpr2d` extends the same scheme to a separable-bias 2-CV setup
+(e.g. H–H distance × relative-z desorption umbrella sampling). Each window
+applies one harmonic restraint per CV, so it yields a 2-vector mean-force
+estimate `kappa_d * (center_d - <x_d>)`. A Gaussian process with a separable
+squared-exponential kernel is conditioned on this **gradient field** (a
+derivative-observation GP, using the same kernel derivatives as the 1D code) to
+reconstruct the scalar 2D PMF up to an additive constant, with LOO-calibrated
+uncertainty.
+
+Expected per-window inputs (written by `desorption_2dUS/ui_md_umbrella_2d.py`):
+
+- `COLVAR_window_<i>.dat` with columns `time, cv0, cv1` (CV columns set by
+  `--cv-cols`, default `1 2`).
+- `window_centers_kappa_<i>.txt` with one data line `c0, c1, kappa0, kappa1`.
+
+```bash
+# CLI
+gpr-umbrella-2d --colvar-dir COLVAR --kappa-dir COLVAR \
+                --cv-names hh relz --cv-units A A
+
+# or from Python
+from gpr_umbrella_1d import gpr_umbrella_integration_2d
+res = gpr_umbrella_integration_2d(colvar_dir="COLVAR", kappa_dir="COLVAR")
+```
+
+Outputs: `*_pmf2d_gpr.dat` (cv0, cv1, PMF, sigma on a grid),
+`*_pmf2d_gpr.png` (PMF contour + uncertainty, window centres overlaid) and
+`*_diagnostics2d.png` — an 8-panel sampling/fit diagnostics figure (PMF and
+calibrated uncertainty; window drift centre→mean, mean-force field, and
+autocorrelation time; window-overlap ellipses, per-observation LOO z-scores,
+and the LOO calibration histogram). Pass `plot_diagnostics=False`
+(CLI: `--no-diagnostics`) to skip it.
+
+Run the self-contained synthetic check (no simulation data needed):
+
+```bash
+python examples/run_synthetic_2d_demo.py   # reconstructs a known 2D PMF
+```
+
 ## Citation
 
 This implementation is based on the method introduced in:

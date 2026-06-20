@@ -23,3 +23,6 @@ outputs/
 figures/
 results/
 examples/synthetic_demo/
+
+# 2D demo outputs
+outputs_2d_demo/
