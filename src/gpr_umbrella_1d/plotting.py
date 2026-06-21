@@ -143,10 +143,11 @@ def plot_diagnostics(results: dict, output_prefix: str | None = None) -> plt.Fig
     std_diff        = results["pmf_std"]
     deriv_mean_star = results["deriv_mean"]
     deriv_std       = results["deriv_std"]
-    x_train         = results["x_centers"]
+    x_train         = results["x_means"]
     y               = results["derivatives"]
     derivative_errors = results["derivative_errors"]
     x_means         = results["x_means"]
+    x_centers       = results["x_centers"]
     x_vars          = results["x_vars"]
     n_samples       = results["n_samples"]
     std_residuals   = results["training_std_residuals"]
@@ -220,12 +221,12 @@ def plot_diagnostics(results: dict, output_prefix: str | None = None) -> plt.Fig
     # Window sampling check --------------------------------------------
     ax = fig.add_subplot(gs[1, 0:2])
     sample_se = np.sqrt(x_vars / n_samples)
-    rc_lo, rc_hi = x_train.min(), x_train.max()
+    rc_lo, rc_hi = x_centers.min(), x_centers.max()
     pad = 0.03 * (rc_hi - rc_lo) if rc_hi > rc_lo else 0.1
     ref = np.array([rc_lo - pad, rc_hi + pad])
     ax.plot(ref, ref, linestyle="--", color=PALETTE["guide"],
             linewidth=0.9, alpha=0.7, label="x = centre")
-    ax.errorbar(x_train, x_means, yerr=2 * sample_se, fmt="o",
+    ax.errorbar(x_centers, x_means, yerr=2 * sample_se, fmt="o",
                 markersize=3.5, color=PALETTE["sampling"],
                 ecolor=PALETTE["sampling"], elinewidth=0.8, capsize=0,
                 alpha=0.9, label="⟨x⟩ ± 2 SE")
@@ -295,8 +296,8 @@ def plot_diagnostics(results: dict, output_prefix: str | None = None) -> plt.Fig
         title = f"{title} — {output_prefix}"
 
     setup = (
-        f"{len(x_train)} windows, "
-        f"reaction coordinate {x_train.min():.3g}–{x_train.max():.3g} {cv_unit}, "
+        f"{len(x_centers)} windows, "
+        f"reaction coordinate {x_centers.min():.3g}–{x_centers.max():.3g} {cv_unit}, "
         f"mean force constant κ = {results['kappa'].mean():.3g} {kappa_unit}"
     )
     if cal is not None:

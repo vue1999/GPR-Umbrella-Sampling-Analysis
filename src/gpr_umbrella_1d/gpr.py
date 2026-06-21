@@ -649,7 +649,7 @@ def gpr_umbrella_integration(
         print(f"   Optimised ell: {ell_opt:.3f} {cv_unit}")
         print(f"   Mean derivative error: {derivative_errors.mean():.4f} {deriv_unit}")
 
-    x_train = x_centers
+    x_train = x_means
     y = derivatives
 
     K_dd = k_fprime_fprime(x_train, x_train, sigma_f_opt, ell_opt)
