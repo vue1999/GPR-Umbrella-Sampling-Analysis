@@ -380,7 +380,7 @@ def _grid_then_polish(nll_1d, init: float, bounds: tuple[float, float],
 
 
 def _fit_hyperparameters(
-    x_centers: np.ndarray,
+    x_train: np.ndarray,
     derivatives: np.ndarray,
     derivative_errors: np.ndarray,
     sigma_f_init: float,
@@ -414,7 +414,7 @@ def _fit_hyperparameters(
         ell = fixed_lengthscale
         def nll_sf(sf: float) -> float:
             return neg_log_marginal_likelihood(
-                np.array([sf, ell]), x_centers, derivatives, derivative_errors,
+                np.array([sf, ell]), x_train, derivatives, derivative_errors,
             )
         sigma_f = _grid_then_polish(
             nll_sf, init=sigma_f_init, bounds=(1e-4, 100.0),
@@ -428,7 +428,7 @@ def _fit_hyperparameters(
         sigma_f = fixed_sigma_f
         def nll_ell(ell: float) -> float:
             return neg_log_marginal_likelihood(
-                np.array([sigma_f, ell]), x_centers, derivatives, derivative_errors,
+                np.array([sigma_f, ell]), x_train, derivatives, derivative_errors,
             )
         ell = _grid_then_polish(
             nll_ell, init=ell_init, bounds=(0.02, ell_upper),
@@ -450,7 +450,7 @@ def _fit_hyperparameters(
         x0 = [np.clip(x0[0], *bounds[0]), np.clip(x0[1], *bounds[1])]
         result = minimize(
             neg_log_marginal_likelihood, x0=x0,
-            args=(x_centers, derivatives, derivative_errors),
+            args=(x_train, derivatives, derivative_errors),
             method="L-BFGS-B", bounds=bounds,
         )
         if result.success and result.fun < best_nll:
@@ -618,7 +618,7 @@ def gpr_umbrella_integration(
             print(f"   Using FIXED sigma_f = {fixed_sigma_f:.4f} {energy_unit}")
 
     sigma_f_opt, ell_opt, fit_ok = _fit_hyperparameters(
-        x_centers=x_centers,
+        x_train=x_means,
         derivatives=derivatives,
         derivative_errors=derivative_errors_stat,
         sigma_f_init=sigma_f_init,
