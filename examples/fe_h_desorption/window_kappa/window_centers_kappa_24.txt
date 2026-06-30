@@ -1,0 +1,2 @@
+# Format: Window Center, Kappa Value
+-1.9497, 16.157494

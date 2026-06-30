@@ -112,11 +112,12 @@ Each file must contain at least three numeric columns:
 
 ## Example
 
-See `examples/fe110_h_escape/` for a complete example using COLVAR data from
-an Fe(110) H-escape umbrella sampling simulation:
+See `examples/fe_h_desorption/` for a complete example using COLVAR data from
+an Fe-surface H-desorption umbrella sampling simulation (36 windows with
+per-window force constants):
 
 ```bash
-cd examples/fe110_h_escape
+cd examples/fe_h_desorption
 python run_gpr.py
 ```
 
