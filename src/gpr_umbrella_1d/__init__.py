@@ -4,6 +4,7 @@ from importlib.metadata import version as _pkg_version, PackageNotFoundError
 
 from .gpr import gpr_umbrella_integration, load_plumed_colvar_data, load_window_data
 from .gpr2d import gpr_umbrella_integration_2d, load_plumed_colvar_2d
+from .mep import find_mep, find_minima
 
 __all__ = [
     "gpr_umbrella_integration",
@@ -11,6 +12,8 @@ __all__ = [
     "load_window_data",
     "gpr_umbrella_integration_2d",
     "load_plumed_colvar_2d",
+    "find_mep",
+    "find_minima",
 ]
 
 try:

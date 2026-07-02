@@ -34,6 +34,13 @@ def build_parser() -> argparse.ArgumentParser:
                    help="Skip the PMF + uncertainty figure")
     p.add_argument("--no-diagnostics", action="store_true",
                    help="Skip the 8-panel sampling/fit diagnostics figure")
+    p.add_argument("--find-mep", action="store_true",
+                   help="Locate minima, connect them with a minimum-energy path, "
+                        "and write {prefix}_mep.dat + {prefix}_mep.png")
+    p.add_argument("--mep-endpoints", type=float, nargs=4, default=None,
+                   metavar=("X0", "Y0", "X1", "Y1"),
+                   help="Physical (cv0,cv1) coords of the two states to connect "
+                        "(default: the two deepest minima)")
     p.add_argument("--quiet", action="store_true")
     return p
 
@@ -57,6 +64,9 @@ def main(argv=None) -> int:
         output_prefix=args.output_prefix,
         plot=not args.no_plot,
         plot_diagnostics=not args.no_diagnostics,
+        find_mep=args.find_mep,
+        mep_endpoints=((tuple(args.mep_endpoints[:2]), tuple(args.mep_endpoints[2:]))
+                       if args.mep_endpoints else None),
         verbose=not args.quiet,
     )
     return 0

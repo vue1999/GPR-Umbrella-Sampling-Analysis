@@ -274,6 +274,8 @@ def gpr_umbrella_integration_2d(
     output_prefix: str | None = None,
     plot: bool = True,
     plot_diagnostics: bool = True,
+    find_mep: bool = False,
+    mep_endpoints=None,
     save_outputs: bool = True,
     verbose: bool = True,
 ) -> dict:
@@ -430,5 +432,33 @@ def gpr_umbrella_integration_2d(
         results["diagnostics_path"] = diag_path
         if verbose:
             print(f"wrote {diag_path}")
+
+    if find_mep:
+        from .mep import find_mep as _find_mep, save_mep
+        mep = _find_mep(results, endpoints=mep_endpoints)
+        results["mep"] = mep
+        if verbose:
+            print(f"MEP: {len(mep['minima'])} minima; "
+                  f"{tuple(round(v,2) for v in mep['start_xy'])} -> "
+                  f"{tuple(round(v,2) for v in mep['end_xy'])}")
+            print(f"     barrier   = {mep['barrier']:.3f} +/- "
+                  f"{mep['barrier_err']:.3f} {energy_unit}  "
+                  f"(TS at {tuple(round(v,2) for v in mep['ts_xy'])})")
+            print(f"     reaction dF = {mep['delta_f']:.3f} +/- "
+                  f"{mep['delta_f_err']:.3f} {energy_unit}")
+        if save_outputs:
+            mep_data = os.path.join(out, f"{output_prefix}_mep.dat")
+            save_mep(mep, mep_data)
+            results["mep_path"] = mep_data
+            if verbose:
+                print(f"wrote {mep_data}")
+        if plot:
+            from .plotting2d import plot_mep
+            mep_fig = os.path.join(out, f"{output_prefix}_mep.png")
+            plot_mep(results, mep, output_path=mep_fig,
+                     output_prefix=output_prefix)
+            results["mep_figure"] = mep_fig
+            if verbose:
+                print(f"wrote {mep_fig}")
 
     return results

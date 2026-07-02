@@ -92,6 +92,22 @@ def test_barrier_location():
     assert abs(x_barrier) < 0.6, f"barrier x={x_barrier:.2f} far from saddle"
 
 
+def test_mep_recovers_saddle(tmp_path):
+    """find_mep connects the two wells through the analytic saddle (x~0),
+    recovers a sensible barrier, and writes both the data file and figure."""
+    data = build_synthetic_data()
+    res = gpr_umbrella_integration_2d(
+        data=data, output_dir=str(tmp_path), output_prefix="mep",
+        plot=True, plot_diagnostics=False, find_mep=True,
+        save_outputs=True, verbose=False, cv_names=("x", "y"),
+    )
+    mep = res["mep"]
+    assert abs(mep["ts_xy"][0]) < 0.5, f"TS x={mep['ts_xy'][0]:.2f} off saddle"
+    assert 0.7 < mep["barrier"] < 1.2, f"barrier {mep['barrier']:.2f} eV"
+    assert (tmp_path / "mep_mep.dat").exists()
+    assert (tmp_path / "mep_mep.png").exists()
+
+
 def test_diagnostics_figure(tmp_path):
     """The 8-panel diagnostics figure is produced and written to disk."""
     data = build_synthetic_data()

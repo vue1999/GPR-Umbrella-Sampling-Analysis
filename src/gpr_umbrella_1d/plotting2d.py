@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from .plotting import PALETTE, apply_plot_style
+from .plotting import PALETTE, apply_plot_style, _band, _annotate
 
 
 def plot_pmf_2d(results: dict, output_path: str | None = None, show: bool = False):
@@ -46,6 +46,20 @@ def plot_pmf_2d(results: dict, output_path: str | None = None, show: bool = Fals
     else:
         plt.close(fig)
     return fig
+
+
+def _chaikin(pts, iters=2):
+    """Chaikin corner-cutting for display only: round a polyline into a smooth
+    curve with fixed endpoints (turns the 8-connected staircase into a line)."""
+    pts = np.asarray(pts, dtype=float)
+    for _ in range(iters):
+        out = [pts[0]]
+        for a, b in zip(pts[:-1], pts[1:]):
+            out.append(0.75 * a + 0.25 * b)
+            out.append(0.25 * a + 0.75 * b)
+        out.append(pts[-1])
+        pts = np.array(out)
+    return pts
 
 
 def _window_scatter(ax, centers, cmap="viridis"):
@@ -221,6 +235,96 @@ def plot_diagnostics_2d(results: dict, output_path: str | None = None,
     fig.text(0.5, 0.935, setup, ha="center", va="top",
              fontsize=9.5, color="#333333")
 
+    if output_path:
+        fig.savefig(output_path, dpi=150, bbox_inches="tight")
+    if show:
+        plt.show()
+    else:
+        plt.close(fig)
+    return fig
+
+
+def plot_mep(results: dict, mep: dict, output_path: str | None = None,
+             output_prefix: str | None = None, show: bool = False):
+    """Two-panel MEP figure: the 2D PMF with the path, and the 1D profile.
+
+    Left:  PMF contour, located minima, and the minimum-energy path with its
+           transition state marked.
+    Right: free energy along the path (relative to the start minimum) with the
+           calibrated ±1σ / ±2σ band and the barrier annotated.
+    """
+    import matplotlib
+    if not show:
+        matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    apply_plot_style()
+
+    GX, GY, pmf = results["GX"], results["GY"], results["pmf"]
+    centers = results["centers"]
+    cvn, cvu = mep["cv_names"], mep["cv_units"]
+    eu = mep["energy_unit"]
+    s, E_rel, sig = mep["s"], mep["pmf_rel"], mep["sigma"]
+    ts_s, barrier, berr = mep["ts_s"], mep["barrier"], mep["barrier_err"]
+
+    fig, axes = plt.subplots(1, 2, figsize=(14, 5.6))
+    fig.subplots_adjust(top=0.82, bottom=0.22, wspace=0.28)
+
+    # --- Left: surface + path ---------------------------------------------
+    ax = axes[0]
+    ax.grid(False)
+    cf = ax.contourf(GX, GY, pmf, levels=30, cmap="viridis")
+    ax.contour(GX, GY, pmf, levels=15, colors="k", linewidths=0.3, alpha=0.4)
+    ax.scatter(centers[:, 0], centers[:, 1], c="white", edgecolors="k",
+               s=18, linewidths=0.4, alpha=0.5, zorder=4)
+    fig.colorbar(cf, ax=ax, label=f"PMF ({eu})")
+    smooth = _chaikin(np.column_stack([mep["x"], mep["y"]]), iters=2)
+    ax.plot(smooth[:, 0], smooth[:, 1], color="black", linestyle="--",
+            linewidth=1.4, dash_capstyle="round", zorder=5, label="MEP")
+    ax.scatter(*mep["start_xy"], c=PALETTE["sampling"], edgecolors="k", s=70,
+               zorder=6, label="start")
+    ax.scatter(*mep["end_xy"], c=PALETTE["pmf"], edgecolors="k", s=70,
+               zorder=6, label="end")
+    ax.scatter(*mep["ts_xy"], marker="*", c=PALETTE["warn"], edgecolors="k",
+               s=200, zorder=7, label="TS")
+    ax.set_xlabel(f"{cvn[0]} ({cvu[0]})")
+    ax.set_ylabel(f"{cvn[1]} ({cvu[1]})")
+    ax.set_title("Minimum-energy path")
+    ax.legend(loc="best")
+    _annotate(ax, f"TS at ({mep['ts_xy'][0]:.2g}, {mep['ts_xy'][1]:.2g}) "
+                  f"{cvu[0]}   ·   {len(mep['minima'])} minima")
+
+    # --- Right: energy profile along the path -----------------------------
+    ax = axes[1]
+    _band(ax, s, E_rel, sig, PALETTE["guide"], label="calibrated ±1σ / ±2σ")
+    ax.plot(s, E_rel, color="black", linewidth=1.8, label="ΔF along MEP")
+    ax.axhline(0, color=PALETTE["guide"], linewidth=0.6, alpha=0.6)
+    ax.axvline(ts_s, color=PALETTE["warn"], linestyle="--", linewidth=0.9,
+               alpha=0.75)
+    ax.scatter([ts_s], [barrier], marker="*", c=PALETTE["warn"],
+               edgecolors="k", s=190, zorder=6, label="TS")
+    ax.set_xlabel(f"Path coordinate s ({cvu[0]})")
+    ax.set_ylabel(f"ΔF from start ({eu})")
+    ax.set_title("Free-energy profile along MEP")
+    ax.legend(loc="best")
+    _annotate(ax,
+              f"barrier = {barrier:.3g} ± {berr:.2g} {eu}     "
+              f"ΔF = {mep['delta_f']:.3g} ± {mep['delta_f_err']:.2g} {eu}")
+
+    # Header block (matches the diagnostics figure so the two read as a set)
+    title = "2D GPR minimum-energy path"
+    if output_prefix:
+        title = f"{title} — {output_prefix}"
+    ell = np.atleast_1d(results["lengthscale"])
+    setup = (
+        f"{len(centers)} windows  ·  σ_f = {results['sigma_f']:.3g} {eu}  ·  "
+        f"ℓ = ({ell[0]:.3g}, {ell[-1]:.3g}) ({cvu[0]}, {cvu[1]})  ·  "
+        f"minimax path over the GP surface"
+    )
+    fig.text(0.5, 0.965, title, ha="center", va="top",
+             fontsize=13, fontweight="bold")
+    fig.text(0.5, 0.925, setup, ha="center", va="top",
+             fontsize=9.5, color="#333333")
     if output_path:
         fig.savefig(output_path, dpi=150, bbox_inches="tight")
     if show:
