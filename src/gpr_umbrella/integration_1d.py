@@ -13,6 +13,31 @@ from scipy.linalg import cho_factor, cho_solve
 KJ_PER_MOL_PER_EV = 96.485
 
 
+def _kj_per_mol_to_energy_factor(energy_unit: str) -> float:
+    """Multiplicative conversion from kJ/mol to a supported energy unit."""
+    normalized = energy_unit.strip().lower().replace(" ", "")
+    factors = {
+        "ev": 1.0 / KJ_PER_MOL_PER_EV,
+        "kj/mol": 1.0,
+        "kjmol-1": 1.0,
+        "kcal/mol": 1.0 / 4.184,
+        "kcalmol-1": 1.0 / 4.184,
+        "j/mol": 1000.0,
+        "jmol-1": 1000.0,
+        "hartree": 1.0 / 2625.4996394799,
+        "ha": 1.0 / 2625.4996394799,
+        "eh": 1.0 / 2625.4996394799,
+    }
+    try:
+        return factors[normalized]
+    except KeyError as exc:
+        supported = "eV, kJ/mol, kcal/mol, J/mol, or Hartree"
+        raise ValueError(
+            f"Cannot convert kJ/mol kappa values to {energy_unit!r}; "
+            f"supported energy units are {supported}"
+        ) from exc
+
+
 def _extract_window_index(filepath: str) -> int:
     """Extract numeric window index from filename.
 
@@ -29,6 +54,7 @@ def load_window_data(
     data_folder: str,
     usecols: tuple[int, ...] = (1, 2, 3),
     kappa_in_kj_per_mol: bool = True,
+    energy_unit: str = "eV",
 ) -> dict:
     """Load umbrella window data from window_*.ui_dat files.
 
@@ -40,8 +66,10 @@ def load_window_data(
         Column indices to load (position, centre, kappa).
     kappa_in_kj_per_mol : bool
         If True (default), kappa in the files is in kJ/mol/CV_unit² and will
-        be converted to eV/CV_unit².  Set to False if kappa is already in
-        eV/CV_unit².
+        be converted to ``energy_unit/CV_unit²``. Set to False if kappa is
+        already expressed in ``energy_unit/CV_unit²``.
+    energy_unit : str
+        Numerical energy unit used by the reconstruction (default: eV).
     """
     window_files = glob.glob(os.path.join(data_folder, "window_*.ui_dat"))
     window_files = sorted(window_files, key=_extract_window_index)
@@ -62,7 +90,9 @@ def load_window_data(
         kappa_raw = data[0, 2]
 
         if kappa_in_kj_per_mol:
-            kappa_list.append(kappa_raw / KJ_PER_MOL_PER_EV)
+            kappa_list.append(
+                kappa_raw * _kj_per_mol_to_energy_factor(energy_unit)
+            )
         else:
             kappa_list.append(kappa_raw)
         x_centers.append(eq_position)
@@ -89,6 +119,7 @@ def load_plumed_colvar_data(
     centers: str | np.ndarray | list | None = None,
     kappa_in_kj_per_mol: bool = False,
     cv_col: int = 1,
+    energy_unit: str = "eV",
 ) -> dict:
     """Load umbrella window data from PLUMED COLVAR files.
 
@@ -97,7 +128,8 @@ def load_plumed_colvar_data(
     colvar_dir : str
         Directory containing ``COLVAR_window_*.dat`` files.
     kappa : float, optional
-        Single force constant for all windows (eV/CV_unit² by default).
+        Single force constant for all windows (``energy_unit/CV_unit²``;
+        eV/CV_unit² by default).
     kappa_dir : str, optional
         Directory with per-window ``window_centers_kappa_*.txt`` files.
         Each file contains one data line: ``center, kappa``.
@@ -108,6 +140,8 @@ def load_plumed_colvar_data(
         If True, kappa values are in kJ/mol/CV_unit².  Default False.
     cv_col : int
         Column index (0-based) for the CV in COLVAR files.  Default 1.
+    energy_unit : str
+        Numerical energy unit used by the reconstruction (default: eV).
 
     Returns
     -------
@@ -186,9 +220,9 @@ def load_plumed_colvar_data(
     else:
         raise ValueError("Provide either 'kappa' (single value) or 'kappa_dir'.")
 
-    # Convert kappa to eV/CV^2 if given in kJ/mol
+    # Convert kappa to the requested numerical energy unit if given in kJ/mol.
     if kappa_in_kj_per_mol:
-        kappa_arr = kappa_arr / KJ_PER_MOL_PER_EV
+        kappa_arr = kappa_arr * _kj_per_mol_to_energy_factor(energy_unit)
 
     x_means = np.array([np.mean(p) for p in all_positions])
     x_vars = np.array([np.var(p, ddof=1) for p in all_positions])
@@ -218,10 +252,11 @@ def compute_tau_int(
     default.  A secondary hard cutoff is applied when the ACF drops below
     *acf_threshold* for robustness against noisy tails.
     """
-    x = positions - np.mean(positions)
-    n = len(x)
+    positions = np.asarray(positions, dtype=float)
+    n = len(positions)
     if n < 4:
         return 0.5
+    x = positions - np.mean(positions)
     max_lag = min(max_lag, max(1, n // 4))
 
     f = np.fft.fft(x, n=2 * n)
@@ -299,6 +334,21 @@ def k_fprime_fprime(
 # Marginal likelihood & LOO
 # ---------------------------------------------------------------------------
 
+def _with_relative_diagonal_jitter_1d(
+    covariance: np.ndarray,
+    relative: float = 1e-8,
+) -> np.ndarray:
+    """Return a copy with unit-covariant diagonal regularization."""
+    covariance = np.asarray(covariance, dtype=float)
+    if covariance.ndim != 2 or covariance.shape[0] != covariance.shape[1]:
+        raise ValueError("covariance must be a square matrix")
+    diagonal = np.diag(covariance)
+    if np.any(~np.isfinite(diagonal)) or np.any(diagonal <= 0):
+        raise ValueError("covariance must have a finite positive diagonal")
+    result = covariance.copy()
+    result[np.diag_indices_from(result)] += relative * diagonal
+    return result
+
 def neg_log_marginal_likelihood(
     params: np.ndarray,
     x_train: np.ndarray,
@@ -307,13 +357,13 @@ def neg_log_marginal_likelihood(
 ) -> float:
     """Negative log marginal likelihood for hyperparameter optimisation."""
     sigma_f, ell = params
-    if ell <= 0.01 or sigma_f <= 0:
+    if ell <= 0 or sigma_f <= 0:
         return 1e10
 
     n = len(x_train)
     K_dd = k_fprime_fprime(x_train, x_train, sigma_f, ell)
     Sigma_y = np.diag(errors**2)
-    Ky = K_dd + Sigma_y + 1e-8 * np.eye(n)
+    Ky = _with_relative_diagonal_jitter_1d(K_dd + Sigma_y)
 
     try:
         L, low = cho_factor(Ky)
@@ -340,7 +390,7 @@ def leave_one_out_cv(
     n = len(x_train)
     K_dd = k_fprime_fprime(x_train, x_train, sigma_f, ell)
     Sigma_y = np.diag(errors**2)
-    Ky = K_dd + Sigma_y + 1e-8 * np.eye(n)
+    Ky = _with_relative_diagonal_jitter_1d(K_dd + Sigma_y)
 
     # Use Cholesky to get the inverse stably
     L, low = cho_factor(Ky)
@@ -348,15 +398,20 @@ def leave_one_out_cv(
     alpha = Ky_inv @ y
 
     diag_inv = np.diag(Ky_inv)
-    # Guard against zero / negative diagonal (ill-conditioned)
-    diag_inv = np.maximum(diag_inv, 1e-15)
+    if np.any(~np.isfinite(diag_inv)) or np.any(diag_inv <= 0):
+        raise np.linalg.LinAlgError("LOO precision diagonal is not finite and positive")
 
     loo_means = y - alpha / diag_inv
     loo_vars = 1.0 / diag_inv
     loo_stds = np.sqrt(np.maximum(loo_vars, 0.0))
 
     loo_residuals = y - loo_means
-    loo_z = loo_residuals / np.maximum(loo_stds, 1e-15)
+    loo_z = np.divide(
+        loo_residuals,
+        loo_stds,
+        out=np.zeros_like(loo_residuals),
+        where=loo_stds > 0,
+    )
 
     return loo_means, loo_stds, loo_z
 
@@ -364,20 +419,6 @@ def leave_one_out_cv(
 # ---------------------------------------------------------------------------
 # Hyperparameter fitting
 # ---------------------------------------------------------------------------
-
-def _grid_then_polish(nll_1d, init: float, bounds: tuple[float, float],
-                      log_lo: float, log_hi: float, n_grid: int = 200) -> float:
-    """Coarse log-spaced grid search followed by L-BFGS-B polish for a 1-D NLL."""
-    grid = np.logspace(log_lo, log_hi, n_grid)
-    best_x, best_nll = float(init), np.inf
-    for x_try in grid:
-        nll = nll_1d(float(x_try))
-        if nll < best_nll:
-            best_nll, best_x = nll, float(x_try)
-    res = minimize(lambda p: nll_1d(float(p[0])),
-                   x0=[best_x], method="L-BFGS-B", bounds=[bounds])
-    return float(res.x[0]) if res.success else best_x
-
 
 def _fit_hyperparameters(
     x_train: np.ndarray,
@@ -399,74 +440,101 @@ def _fit_hyperparameters(
         ``ok`` is False only when a joint 2-D optimisation failed for every
         starting point; callers may emit a warning.
     """
-    # Both fixed → nothing to do
-    if fixed_sigma_f is not None and fixed_lengthscale is not None:
-        return fixed_sigma_f, fixed_lengthscale, True
-
-    # No optimisation requested → return initial estimates (respecting fixes)
-    if not optimize:
-        return (fixed_sigma_f if fixed_sigma_f is not None else sigma_f_init,
-                fixed_lengthscale if fixed_lengthscale is not None else ell_init,
-                True)
-
-    # Lengthscale fixed → 1-D search over sigma_f
-    if fixed_lengthscale is not None:
-        ell = fixed_lengthscale
-        def nll_sf(sf: float) -> float:
-            return neg_log_marginal_likelihood(
-                np.array([sf, ell]), x_train, derivatives, derivative_errors,
-            )
-        sigma_f = _grid_then_polish(
-            nll_sf, init=sigma_f_init, bounds=(1e-4, 100.0),
-            log_lo=np.log10(max(sigma_f_init * 0.01, 1e-4)),
-            log_hi=np.log10(max(sigma_f_init * 100, 10.0)),
-        )
-        return sigma_f, ell, True
-
-    # sigma_f fixed → 1-D search over ell
+    values = np.array([sigma_f_init, ell_init, ell_upper, cv_range], dtype=float)
+    if np.any(~np.isfinite(values)) or np.any(values <= 0):
+        raise ValueError("Initial GP hyperparameter scales must be finite and positive")
     if fixed_sigma_f is not None:
-        sigma_f = fixed_sigma_f
-        def nll_ell(ell: float) -> float:
-            return neg_log_marginal_likelihood(
-                np.array([sigma_f, ell]), x_train, derivatives, derivative_errors,
-            )
-        ell = _grid_then_polish(
-            nll_ell, init=ell_init, bounds=(0.02, ell_upper),
-            log_lo=np.log10(0.02), log_hi=np.log10(ell_upper),
-        )
-        return sigma_f, ell, True
+        fixed_sigma_f = float(fixed_sigma_f)
+        if not np.isfinite(fixed_sigma_f) or fixed_sigma_f <= 0:
+            raise ValueError("fixed_sigma_f must be finite and positive")
+    if fixed_lengthscale is not None:
+        fixed_lengthscale = float(fixed_lengthscale)
+        if not np.isfinite(fixed_lengthscale) or fixed_lengthscale <= 0:
+            raise ValueError("fixed_lengthscale must be finite and positive")
 
-    # Joint 2-D optimisation, multi-start
-    bounds = [(0.001, 100.0), (0.02, ell_upper)]
-    starting_points = [
-        [sigma_f_init, ell_init],
-        [0.5 * sigma_f_init, 0.5 * ell_init],
-        [2.0 * sigma_f_init, 2.0 * ell_init],
-        [sigma_f_init, 0.5 * cv_range],
-        [0.1, 1.0],
-    ]
-    best_params, best_nll = (sigma_f_init, ell_init), np.inf
-    for x0 in starting_points:
-        x0 = [np.clip(x0[0], *bounds[0]), np.clip(x0[1], *bounds[1])]
+    if not optimize or (
+        fixed_sigma_f is not None and fixed_lengthscale is not None
+    ):
+        return (
+            fixed_sigma_f if fixed_sigma_f is not None else sigma_f_init,
+            fixed_lengthscale if fixed_lengthscale is not None else ell_init,
+            True,
+        )
+
+    ell_lower = ell_upper / 3000.0
+    bounds: list[tuple[float, float]] = []
+    if fixed_sigma_f is None:
+        bounds.append((np.log(1e-3), np.log(1e3)))
+    if fixed_lengthscale is None:
+        bounds.append((np.log(ell_lower / ell_init), np.log(ell_upper / ell_init)))
+
+    def unpack(log_ratios: np.ndarray) -> tuple[float, float]:
+        cursor = 0
+        if fixed_sigma_f is None:
+            sigma_f = sigma_f_init * np.exp(log_ratios[cursor])
+            cursor += 1
+        else:
+            sigma_f = fixed_sigma_f
+        if fixed_lengthscale is None:
+            ell = ell_init * np.exp(log_ratios[cursor])
+        else:
+            ell = fixed_lengthscale
+        return float(sigma_f), float(ell)
+
+    def dimensionless_nll(log_ratios: np.ndarray) -> float:
+        sigma_f, ell = unpack(log_ratios)
+        return neg_log_marginal_likelihood(
+            np.array([sigma_f, ell]),
+            x_train,
+            derivatives,
+            derivative_errors,
+        )
+
+    starts = []
+    for sigma_scale, ell_scale in (
+        (1.0, 1.0),
+        (0.5, 0.5),
+        (2.0, 2.0),
+        (1.0, 0.5),
+        (0.5, 2.0),
+    ):
+        start = []
+        if fixed_sigma_f is None:
+            start.append(np.log(sigma_scale))
+        if fixed_lengthscale is None:
+            start.append(np.log(ell_scale))
+        start = np.asarray(start, dtype=float)
+        for index, (lower, upper) in enumerate(bounds):
+            start[index] = np.clip(start[index], lower, upper)
+        starts.append(start)
+
+    best, best_nll = None, np.inf
+    for start in starts:
         result = minimize(
-            neg_log_marginal_likelihood, x0=x0,
-            args=(x_train, derivatives, derivative_errors),
-            method="L-BFGS-B", bounds=bounds,
+            dimensionless_nll,
+            x0=start,
+            method="L-BFGS-B",
+            bounds=bounds,
         )
         if result.success and result.fun < best_nll:
-            best_nll = result.fun
-            best_params = tuple(result.x)
+            best_nll = float(result.fun)
+            best = result.x
 
-    if best_nll < np.inf:
-        return best_params[0], best_params[1], True
-    return sigma_f_init, ell_init, False
+    if best is None:
+        return (
+            fixed_sigma_f if fixed_sigma_f is not None else sigma_f_init,
+            fixed_lengthscale if fixed_lengthscale is not None else ell_init,
+            False,
+        )
+    sigma_f, ell = unpack(best)
+    return sigma_f, ell, True
 
 
 # ---------------------------------------------------------------------------
 # Main entry point
 # ---------------------------------------------------------------------------
 
-def gpr_umbrella_integration(
+def reconstruct_pmf_1d(
     data_folder: str | None = None,
     colvar_dir: str | None = None,
     kappa: float | None = None,
@@ -504,9 +572,9 @@ def gpr_umbrella_integration(
 
     Units
     -----
-    Internally, force constants are stored in ``energy_unit / cv_unit^2``
-    (default eV/nm^2).  Set *cv_unit* and *energy_unit* to control axis
-    labels and output headers.
+    Internally, force constants and PMFs are stored numerically in
+    ``energy_unit / cv_unit^2`` and ``energy_unit`` (default eV/nm^2 and eV).
+    Set *cv_unit* and *energy_unit* to control both numerical units and labels.
     """
     if data_folder is not None and colvar_dir is not None:
         raise ValueError("Specify either data_folder or colvar_dir, not both.")
@@ -519,13 +587,14 @@ def gpr_umbrella_integration(
             centers=centers,
             kappa_in_kj_per_mol=kappa_in_kj_per_mol,
             cv_col=cv_col,
+            energy_unit=energy_unit,
         )
         base_dir = os.path.dirname(os.path.abspath(colvar_dir).rstrip("/"))
     elif data_folder is not None:
         data_folder = str(data_folder)
         if not os.path.isdir(data_folder):
             raise ValueError(f"data_folder does not exist: {data_folder}")
-        data = load_window_data(data_folder)
+        data = load_window_data(data_folder, energy_unit=energy_unit)
         base_dir = os.path.dirname(os.path.abspath(data_folder).rstrip("/"))
     else:
         raise ValueError("Must provide either data_folder or colvar_dir.")
@@ -596,20 +665,30 @@ def gpr_umbrella_integration(
         print(f"   Derivative std: {derivatives.std():.4f} {deriv_unit}")
         print(f"   Mean statistical error: {derivative_errors_stat.mean():.4f} {deriv_unit}")
 
-    if len(x_centers) > 1:
-        window_spacing = np.diff(np.sort(x_centers)).mean()
-    else:
-        window_spacing = 0.1
+    unique_centers = np.unique(x_centers)
+    if len(unique_centers) < 2:
+        raise ValueError("At least two distinct umbrella-window centres are required")
+    center_spacings = np.diff(unique_centers)
+    window_spacing = float(center_spacings.mean())
+    cv_range = float(unique_centers[-1] - unique_centers[0])
+    ell_upper = 3.0 * cv_range
+    ell_init = 2.0 * window_spacing
 
-    # Adaptive bounds based on data range
-    cv_range = x_centers.max() - x_centers.min() if len(x_centers) > 1 else 1.0
-    ell_upper = max(3.0 * cv_range, 5.0)
-
-    ell_init = max(2 * window_spacing, 0.1)
-    deriv_std_val = derivatives.std()
-    if deriv_std_val <= 0:
-        deriv_std_val = 1e-6
-    sigma_f_init = ell_init * deriv_std_val
+    gradient_energy_scale = derivatives * ell_init
+    noise_energy_scale = derivative_errors_stat * ell_init
+    sigma_f_init = float(np.sqrt(
+        np.mean(gradient_energy_scale**2) + np.mean(noise_energy_scale**2)
+    ))
+    if not np.isfinite(sigma_f_init):
+        raise ValueError("Could not derive a finite GP energy scale from the data")
+    if sigma_f_init == 0.0:
+        if fixed_sigma_f is None:
+            raise ValueError(
+                "The derivative observations and their sampling errors are "
+                "exactly zero, so the GP signal scale is unidentifiable; "
+                "provide fixed_sigma_f"
+            )
+        sigma_f_init = float(fixed_sigma_f)
 
     if verbose:
         if fixed_lengthscale is not None:
@@ -638,7 +717,7 @@ def gpr_umbrella_integration(
         if verbose:
             print("\n   WARNING: Hyperparameter optimisation failed, using initial estimates")
 
-    derivative_errors = np.where(derivative_errors_stat > 0, derivative_errors_stat, 1e-12)
+    derivative_errors = np.clip(derivative_errors_stat, 0.0, np.inf)
 
     step += 1
     if verbose:
@@ -654,7 +733,7 @@ def gpr_umbrella_integration(
 
     K_dd = k_fprime_fprime(x_train, x_train, sigma_f_opt, ell_opt)
     Sigma_y = np.diag(derivative_errors**2)
-    Ky = K_dd + Sigma_y + 1e-8 * np.eye(len(x_train))
+    Ky = _with_relative_diagonal_jitter_1d(K_dd + Sigma_y)
 
     L_chol, low = cho_factor(Ky)
     alpha = cho_solve((L_chol, low), y)
@@ -693,7 +772,12 @@ def gpr_umbrella_integration(
     # Training residuals: posterior mean at training points vs observed
     deriv_pred_train = K_dd @ alpha
     residuals = y - deriv_pred_train
-    std_residuals = residuals / derivative_errors
+    std_residuals = np.divide(
+        residuals,
+        derivative_errors,
+        out=np.zeros_like(residuals),
+        where=derivative_errors > 0,
+    )
 
     step += 1
     if verbose:
@@ -740,7 +824,15 @@ def gpr_umbrella_integration(
             if verbose:
                 print(f"\n{step}. UNCERTAINTY CALIBRATION")
                 print(f"   LOO z-score std: {cal_factor:.3f}")
-                print(f"   PMF and dF/dx uncertainties rescaled by this factor.")
+                print("   PMF and dF/dx uncertainties rescaled by this factor.")
+
+    try:
+        sigma_f_kj = sigma_f_opt / _kj_per_mol_to_energy_factor(energy_unit)
+    except ValueError:
+        # ``energy_unit`` may be a user-defined unit when no kJ conversion was
+        # requested. Preserve reconstruction and mark this legacy convenience
+        # field unavailable instead of treating a label as a numerical error.
+        sigma_f_kj = None
 
     results = {
         "x_centers": x_centers,
@@ -755,7 +847,7 @@ def gpr_umbrella_integration(
         "n_eff": n_eff,
         "lengthscale": ell_opt,
         "sigma_f": sigma_f_opt,
-        "sigma_f_kJ": sigma_f_opt * KJ_PER_MOL_PER_EV,
+        "sigma_f_kJ": sigma_f_kj,
         "cv_unit": cv_unit,
         "energy_unit": energy_unit,
         "deriv_unit": deriv_unit,
@@ -780,12 +872,12 @@ def gpr_umbrella_integration(
 
     fig_path = None
     if plot:
-        from .plotting import plot_diagnostics
+        from .plotting_1d import plot_diagnostics
 
         fig = plot_diagnostics(results, output_prefix=output_prefix)
         if save_fig:
             if figure_path is None:
-                figure_path = os.path.join(output_dir, f"{output_prefix}_gpr_analysis.png")
+                figure_path = os.path.join(output_dir, f"{output_prefix}_diagnostics_1d.png")
             fig.savefig(figure_path, dpi=figure_dpi, bbox_inches="tight")
             fig_path = figure_path
             step += 1
@@ -806,8 +898,8 @@ def gpr_umbrella_integration(
         pmf_data = np.column_stack([x_star, f_mean_diff, std_diff])
         deriv_data = np.column_stack([x_star, deriv_mean_star, deriv_std])
 
-        pmf_path = os.path.join(output_dir, f"{output_prefix}_pmf_gpr.dat")
-        deriv_path = os.path.join(output_dir, f"{output_prefix}_deriv_gpr.dat")
+        pmf_path = os.path.join(output_dir, f"{output_prefix}_pmf_1d.dat")
+        deriv_path = os.path.join(output_dir, f"{output_prefix}_mean_force_1d.dat")
 
         hp_header = (f"sigma_f={sigma_f_opt:.6f} {energy_unit}  "
                      f"lengthscale={ell_opt:.6f} {cv_unit}")

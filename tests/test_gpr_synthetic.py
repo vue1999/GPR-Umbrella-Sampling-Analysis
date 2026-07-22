@@ -5,12 +5,11 @@ derivative dF/dx = a * x, then run GPR umbrella integration and check
 that the recovered PMF and derivatives are close to the ground truth.
 """
 import os
-import tempfile
 
 import numpy as np
 import pytest
 
-from gpr_umbrella_1d.gpr import gpr_umbrella_integration
+from gpr_umbrella.integration_1d import reconstruct_pmf_1d
 
 
 def _generate_synthetic_colvar_data(tmpdir: str, n_windows: int = 15):
@@ -61,7 +60,7 @@ class TestSyntheticHarmonic:
 
     def test_pmf_shape_is_parabolic(self):
         """Recovered PMF should approximate 0.5 * a * x^2."""
-        results = gpr_umbrella_integration(
+        results = reconstruct_pmf_1d(
             colvar_dir=self.colvar_dir,
             kappa=self.kappa,
             centers=self.centers_file,
@@ -89,7 +88,7 @@ class TestSyntheticHarmonic:
 
     def test_derivatives_match_linear(self):
         """Recovered derivatives should approximate a * x."""
-        results = gpr_umbrella_integration(
+        results = reconstruct_pmf_1d(
             colvar_dir=self.colvar_dir,
             kappa=self.kappa,
             centers=self.centers_file,
@@ -111,7 +110,7 @@ class TestSyntheticHarmonic:
 
     def test_loo_z_scores_reasonable(self):
         """LOO z-score std should be in a reasonable range."""
-        results = gpr_umbrella_integration(
+        results = reconstruct_pmf_1d(
             colvar_dir=self.colvar_dir,
             kappa=self.kappa,
             centers=self.centers_file,
@@ -131,7 +130,7 @@ class TestSyntheticHarmonic:
 
     def test_output_files_created(self):
         """Ensure PMF/derivative/figure files are saved correctly."""
-        results = gpr_umbrella_integration(
+        results = reconstruct_pmf_1d(
             colvar_dir=self.colvar_dir,
             kappa=self.kappa,
             centers=self.centers_file,
@@ -152,6 +151,9 @@ class TestSyntheticHarmonic:
         assert os.path.isfile(results["pmf_path"])
         assert os.path.isfile(results["deriv_path"])
         assert os.path.isfile(results["figure_path"])
+        assert os.path.basename(results["pmf_path"]) == "synthetic_pmf_1d.dat"
+        assert os.path.basename(results["deriv_path"]) == "synthetic_mean_force_1d.dat"
+        assert os.path.basename(results["figure_path"]) == "synthetic_diagnostics_1d.png"
 
         # Check PMF file has correct shape
         pmf_data = np.loadtxt(results["pmf_path"])
@@ -170,7 +172,7 @@ class TestEdgeCases:
         np.savetxt(bad_centers, np.linspace(0, 1, 5), fmt="%.4f")
 
         with pytest.raises(ValueError, match="centres"):
-            gpr_umbrella_integration(
+            reconstruct_pmf_1d(
                 colvar_dir=colvar_dir,
                 kappa=kappa,
                 centers=bad_centers,
@@ -182,12 +184,12 @@ class TestEdgeCases:
     def test_no_data_source_raises(self):
         """Passing neither data_folder nor colvar_dir should raise."""
         with pytest.raises(ValueError, match="Must provide"):
-            gpr_umbrella_integration(plot=False, save_outputs=False, verbose=False)
+            reconstruct_pmf_1d(plot=False, save_outputs=False, verbose=False)
 
     def test_both_data_sources_raises(self, tmp_path):
         """Passing both data_folder and colvar_dir should raise."""
         with pytest.raises(ValueError, match="not both"):
-            gpr_umbrella_integration(
+            reconstruct_pmf_1d(
                 data_folder=str(tmp_path),
                 colvar_dir=str(tmp_path),
                 plot=False,
@@ -200,7 +202,7 @@ class TestEdgeCases:
         empty_dir = str(tmp_path / "empty")
         os.makedirs(empty_dir)
         with pytest.raises(ValueError, match="No COLVAR"):
-            gpr_umbrella_integration(
+            reconstruct_pmf_1d(
                 colvar_dir=empty_dir,
                 kappa=1.0,
                 centers=[0.0],

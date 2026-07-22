@@ -3,9 +3,9 @@ requires = ["setuptools>=68", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "gpr-umbrella-1d"
+name = "gpr-umbrella"
 version = "0.1.0"
-description = "Gaussian process umbrella integration for 1D PLUMED umbrella sampling outputs."
+description = "Gaussian-process umbrella integration for 1D and 2D PLUMED data."
 readme = "README.md"
 requires-python = ">=3.9"
 license = {text = "MIT"}
@@ -25,8 +25,8 @@ dependencies = [
 ]
 
 [project.scripts]
-gpr-umbrella = "gpr_umbrella_1d.cli:main"
-gpr-umbrella-2d = "gpr_umbrella_1d.cli2d:main"
+gpr-umbrella = "gpr_umbrella.cli_1d:main"
+gpr-umbrella-2d = "gpr_umbrella.cli_2d:main"
 
 [project.optional-dependencies]
 test = ["pytest>=7"]

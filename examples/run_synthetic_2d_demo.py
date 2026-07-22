@@ -8,7 +8,7 @@ analytic surface so it runs without any simulation data.
 """
 import numpy as np
 
-from gpr_umbrella_1d.gpr2d import gpr_umbrella_integration_2d
+from gpr_umbrella import reconstruct_pmf_2d
 
 # Reuse the synthetic builder from the test suite.
 import sys
@@ -19,7 +19,7 @@ from test_gpr_2d_synthetic import build_synthetic_data, true_pmf  # noqa: E402
 
 def main():
     data = build_synthetic_data(n_per_side=6, n_samples=4000)
-    res = gpr_umbrella_integration_2d(
+    res = reconstruct_pmf_2d(
         data=data,
         cv_names=("x", "y"),
         cv_units=("u", "u"),

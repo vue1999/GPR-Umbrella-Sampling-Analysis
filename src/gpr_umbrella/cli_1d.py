@@ -3,7 +3,7 @@ from __future__ import annotations
 import argparse
 import sys
 
-from .gpr import gpr_umbrella_integration
+from .integration_1d import reconstruct_pmf_1d
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -17,13 +17,15 @@ def build_parser() -> argparse.ArgumentParser:
 
     # ---- force constant / centres ----
     parser.add_argument("--kappa", type=float, default=None,
-                        help="Single force constant for all windows (eV/CV^2 by default)")
+                        help="Single force constant for all windows in "
+                             "--energy-unit/CV^2 (eV/CV^2 by default)")
     parser.add_argument("--kappa-dir", default=None,
                         help="Directory with per-window window_centers_kappa_*.txt files")
     parser.add_argument("--centers", default=None,
                         help="File with one window centre per line (required with --kappa)")
     parser.add_argument("--kappa-kj", action="store_true",
-                        help="Kappa values are in kJ/mol/CV^2 instead of eV/CV^2")
+                        help="Kappa values are in kJ/mol/CV^2 and should be "
+                             "converted to --energy-unit/CV^2")
     parser.add_argument("--cv-col", type=int, default=1,
                         help="0-based column index for the CV in COLVAR files (default: 1)")
 
@@ -31,7 +33,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--cv-unit", default="nm",
                         help="Label for the collective-variable axis (default: nm)")
     parser.add_argument("--energy-unit", default="eV",
-                        help="Label for the energy axis (default: eV)")
+                        help="Numerical/output energy unit (default: eV)")
 
     # ---- outputs ----
     parser.add_argument("--output-dir", default=None, help="Directory for outputs (default: parent of data folder)")
@@ -61,7 +63,7 @@ def main() -> int:
     args = parser.parse_args()
 
     try:
-        results = gpr_umbrella_integration(
+        results = reconstruct_pmf_1d(
             data_folder=args.data_folder,
             colvar_dir=args.colvar_dir,
             kappa=args.kappa,

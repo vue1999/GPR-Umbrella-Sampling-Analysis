@@ -6,7 +6,7 @@ the truth to within a tolerance after aligning the additive constant.
 """
 import numpy as np
 
-from gpr_umbrella_1d.gpr2d import gpr_umbrella_integration_2d
+from gpr_umbrella import reconstruct_pmf_2d
 
 
 def true_pmf(x, y):
@@ -58,7 +58,7 @@ def build_synthetic_data(n_per_side=6, n_samples=4000, kappa=(20.0, 20.0),
 
 def test_2d_pmf_recovery():
     data = build_synthetic_data()
-    res = gpr_umbrella_integration_2d(
+    res = reconstruct_pmf_2d(
         data=data, plot=False, plot_diagnostics=False, save_outputs=False,
         verbose=False, cv_names=("x", "y"), cv_units=("u", "u"),
     )
@@ -78,7 +78,7 @@ def test_barrier_location():
     """The reconstructed barrier (max along the basin-connecting line) sits
     near the analytic saddle at x~0."""
     data = build_synthetic_data()
-    res = gpr_umbrella_integration_2d(
+    res = reconstruct_pmf_2d(
         data=data, plot=False, plot_diagnostics=False, save_outputs=False,
         verbose=False,
     )
@@ -92,30 +92,39 @@ def test_barrier_location():
     assert abs(x_barrier) < 0.6, f"barrier x={x_barrier:.2f} far from saddle"
 
 
-def test_mep_recovers_saddle(tmp_path):
-    """find_mep connects the two wells through the analytic saddle (x~0),
+def test_lowest_barrier_path_recovers_saddle(tmp_path):
+    """The minimax path connects the wells through the analytic saddle (x~0),
     recovers a sensible barrier, and writes both the data file and figure."""
     data = build_synthetic_data()
-    res = gpr_umbrella_integration_2d(
-        data=data, output_dir=str(tmp_path), output_prefix="mep",
-        plot=True, plot_diagnostics=False, find_mep=True,
+    res = reconstruct_pmf_2d(
+        data=data, output_dir=str(tmp_path), output_prefix="path",
+        plot=True, plot_diagnostics=False, find_lowest_barrier=True,
+        path_aligned_marginal=True, thermal_energy=0.15,
+        perpendicular_points=31,
         save_outputs=True, verbose=False, cv_names=("x", "y"),
     )
-    mep = res["mep"]
-    assert abs(mep["ts_xy"][0]) < 0.5, f"TS x={mep['ts_xy'][0]:.2f} off saddle"
-    assert 0.7 < mep["barrier"] < 1.2, f"barrier {mep['barrier']:.2f} eV"
-    assert (tmp_path / "mep_mep.dat").exists()
-    assert (tmp_path / "mep_mep.png").exists()
+    path = res["lowest_barrier_path"]
+    assert abs(path["ts_xy"][0]) < 0.5, f"TS x={path['ts_xy'][0]:.2f} off saddle"
+    assert 0.7 < path["barrier"] < 1.2, f"barrier {path['barrier']:.2f} eV"
+    assert (tmp_path / "path_pmf_2d.dat").exists()
+    assert (tmp_path / "path_pmf_2d.png").exists()
+    assert (tmp_path / "path_lowest_barrier_path.dat").exists()
+    assert (tmp_path / "path_lowest_barrier_path.png").exists()
+    assert (tmp_path / "path_path_aligned_pmf_1d.dat").exists()
+    marginal = res["path_aligned_marginal"]
+    assert marginal["pmf"].min() == 0.0
+    assert np.all(np.isfinite(marginal["pmf"]))
+    assert np.all(np.isfinite(marginal["sigma"]))
 
 
 def test_diagnostics_figure(tmp_path):
     """The 8-panel diagnostics figure is produced and written to disk."""
     data = build_synthetic_data()
-    res = gpr_umbrella_integration_2d(
+    res = reconstruct_pmf_2d(
         data=data, output_dir=str(tmp_path), output_prefix="diag",
         plot=False, plot_diagnostics=True, save_outputs=False, verbose=False,
     )
-    diag = tmp_path / "diag_diagnostics2d.png"
+    diag = tmp_path / "diag_diagnostics_2d.png"
     assert res["diagnostics_path"] == str(diag)
     assert diag.exists() and diag.stat().st_size > 0
     # The diagnostics rely on these fields being exported from the results dict.

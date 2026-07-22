@@ -1,4 +1,4 @@
-"""Regression test against the shipped Fe(110) H escape example data.
+"""Regression test against the shipped Fe-surface H-desorption example data.
 
 This test runs the full pipeline on the example data and checks that
 the key output metrics are in expected ranges.
@@ -6,36 +6,34 @@ the key output metrics are in expected ranges.
 import os
 from pathlib import Path
 
-import numpy as np
 import pytest
 
-from gpr_umbrella_1d import gpr_umbrella_integration
+from gpr_umbrella import reconstruct_pmf_1d
 
-EXAMPLE_DIR = Path(__file__).resolve().parent.parent / "examples" / "fe110_h_escape"
+EXAMPLE_DIR = Path(__file__).resolve().parent.parent / "examples" / "fe_h_desorption"
 
 
 @pytest.mark.skipif(
     not (EXAMPLE_DIR / "COLVAR").is_dir(),
     reason="Example COLVAR data not present",
 )
-class TestFe110Example:
+class TestFeHDesorptionExample:
     @pytest.fixture(autouse=True)
     def run_example(self, tmp_path):
-        self.results = gpr_umbrella_integration(
+        self.results = reconstruct_pmf_1d(
             colvar_dir=str(EXAMPLE_DIR / "COLVAR"),
-            kappa=24.305,
-            centers=str(EXAMPLE_DIR / "window_centers.txt"),
+            kappa_dir=str(EXAMPLE_DIR / "window_kappa"),
             cv_unit="nm",
             energy_unit="eV",
             output_dir=str(tmp_path),
-            output_prefix="fe110_test",
+            output_prefix="fe_h_desorption_test",
             plot=False,
             save_outputs=True,
             verbose=False,
         )
 
     def test_number_of_windows(self):
-        assert len(self.results["x_centers"]) == 29
+        assert len(self.results["x_centers"]) == 36
 
     def test_pmf_has_correct_shape(self):
         assert len(self.results["pmf_mean"]) == 200
@@ -65,3 +63,5 @@ class TestFe110Example:
         assert os.path.isfile(self.results["pmf_path"])
         assert self.results["deriv_path"] is not None
         assert os.path.isfile(self.results["deriv_path"])
+        assert Path(self.results["pmf_path"]).name == "fe_h_desorption_test_pmf_1d.dat"
+        assert Path(self.results["deriv_path"]).name == "fe_h_desorption_test_mean_force_1d.dat"
