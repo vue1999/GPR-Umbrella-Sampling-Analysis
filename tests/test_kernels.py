@@ -5,9 +5,8 @@ comparing analytic kernel expressions against finite-difference
 approximations of the base SE kernel.
 """
 import numpy as np
-import pytest
 
-from gpr_umbrella_1d.gpr import k_base, k_f_fprime, k_fprime_fprime
+from gpr_umbrella.integration_1d import k_base, k_f_fprime, k_fprime_fprime
 
 
 SIGMA_F = 1.5

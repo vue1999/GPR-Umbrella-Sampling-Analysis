@@ -3,23 +3,26 @@ from __future__ import annotations
 
 import numpy as np
 
-from .plotting import PALETTE, apply_plot_style, _band, _annotate
+from .plotting_1d import PALETTE, apply_plot_style, _band, _annotate
 
 
 def plot_pmf_2d(results: dict, output_path: str | None = None, show: bool = False):
-    """Filled-contour PMF + per-point uncertainty, with window centres overlaid."""
+    """Plot the reconstructed PMF plus raw and LOO-scaled uncertainties."""
     import matplotlib
     if not show:
         matplotlib.use("Agg")
     import matplotlib.pyplot as plt
 
     GX, GY = results["GX"], results["GY"]
-    pmf, pmf_std = results["pmf"], results["pmf_std"]
+    mask = ~results["support_mask"]
+    pmf = np.ma.masked_where(mask, results["pmf"])
+    pmf_std_raw = np.ma.masked_where(mask, results["pmf_std_raw"])
+    pmf_std_calibrated = np.ma.masked_where(mask, results["pmf_std_calibrated"])
     centers = results["centers"]
     cvn, cvu = results["cv_names"], results["cv_units"]
     eu = results["energy_unit"]
 
-    fig, axes = plt.subplots(1, 2, figsize=(13, 5.2))
+    fig, axes = plt.subplots(1, 3, figsize=(18, 5.2))
 
     cf = axes[0].contourf(GX, GY, pmf, levels=30, cmap="viridis")
     axes[0].contour(GX, GY, pmf, levels=15, colors="k", linewidths=0.3, alpha=0.4)
@@ -29,10 +32,16 @@ def plot_pmf_2d(results: dict, output_path: str | None = None, show: bool = Fals
     axes[0].set_title("2D PMF (GPR umbrella integration)")
     axes[0].legend(loc="upper right", fontsize=8)
 
-    cs = axes[1].contourf(GX, GY, pmf_std, levels=30, cmap="magma")
+    cs = axes[1].contourf(GX, GY, pmf_std_raw, levels=30, cmap="magma")
     axes[1].scatter(centers[:, 0], centers[:, 1], c="cyan", edgecolors="k", s=18)
     fig.colorbar(cs, ax=axes[1], label=f"PMF uncertainty ({eu})")
-    axes[1].set_title("Calibrated 1-sigma uncertainty")
+    axes[1].set_title("Raw GP 1σ uncertainty")
+
+    cs = axes[2].contourf(GX, GY, pmf_std_calibrated, levels=30, cmap="magma")
+    axes[2].scatter(centers[:, 0], centers[:, 1], c="cyan", edgecolors="k", s=18)
+    fig.colorbar(cs, ax=axes[2], label=f"PMF uncertainty ({eu})")
+    factor = results["loo_calibration_factor"]
+    axes[2].set_title(f"LOO-scaled 1σ uncertainty (×{factor:.2f})")
 
     for ax in axes:
         ax.set_xlabel(f"{cvn[0]} ({cvu[0]})")
@@ -96,14 +105,17 @@ def plot_diagnostics_2d(results: dict, output_path: str | None = None,
     apply_plot_style()
 
     GX, GY = results["GX"], results["GY"]
-    pmf, pmf_std = results["pmf"], results["pmf_std"]
+    mask = ~results["support_mask"]
+    pmf = np.ma.masked_where(mask, results["pmf"])
+    uncertainty_key = f"pmf_std_{results['default_uncertainty']}"
+    pmf_std = np.ma.masked_where(mask, results[uncertainty_key])
     centers = results["centers"]
     means = results["means"]
     grad = results["grad"]
     variances = results["vars"]
     tau = results["tau"]
     loo_z = np.asarray(results["loo_z"]).ravel()
-    cal = results.get("uncertainty_calibration_factor")
+    cal = results["loo_calibration_factor"]
     cvn, cvu = results["cv_names"], results["cv_units"]
     eu = results["energy_unit"]
     N = len(centers)
@@ -125,16 +137,18 @@ def plot_diagnostics_2d(results: dict, output_path: str | None = None,
     _window_scatter(ax, centers)
     fig.colorbar(cf, ax=ax, label=f"PMF ({eu})")
     ax.set_title("2D PMF (GPR umbrella integration)")
-    ax.set_xlabel(xlab); ax.set_ylabel(ylab)
+    ax.set_xlabel(xlab)
+    ax.set_ylabel(ylab)
 
     ax = fig.add_subplot(gs[0, 3:6])
     cs = ax.contourf(GX, GY, pmf_std, levels=30, cmap="magma")
     ax.scatter(centers[:, 0], centers[:, 1], c="cyan", edgecolors="k",
                s=16, linewidths=0.4)
     fig.colorbar(cs, ax=ax, label=f"σ ({eu})")
-    band = "calibrated 1σ" if cal else "GP 1σ"
+    band = f"{results['default_uncertainty']} 1σ"
     ax.set_title(f"Uncertainty ({band})")
-    ax.set_xlabel(xlab); ax.set_ylabel(ylab)
+    ax.set_xlabel(xlab)
+    ax.set_ylabel(ylab)
 
     # ------------------------------------------------------------------
     # Row 2 — sampling diagnostics
@@ -142,23 +156,44 @@ def plot_diagnostics_2d(results: dict, output_path: str | None = None,
     # Window drift: arrow from restraint centre to mean sampled position.
     ax = fig.add_subplot(gs[1, 0:2])
     drift = means - centers
-    dmag = np.linalg.norm(drift, axis=1)
+    ell = np.asarray(results["lengthscale"])
+    dmag = np.linalg.norm(drift / ell, axis=1)
     ax.quiver(centers[:, 0], centers[:, 1], drift[:, 0], drift[:, 1],
               dmag, cmap="plasma", angles="xy", scale_units="xy", scale=1.0,
               width=0.006, alpha=0.9)
     ax.scatter(centers[:, 0], centers[:, 1], c=PALETTE["guide"], s=6, zorder=5)
-    ax.set_title(f"Window drift  (max |Δ| = {dmag.max():.2f} {cvu[0]})")
-    ax.set_xlabel(xlab); ax.set_ylabel(ylab)
+    ax.set_title(f"Window drift  (max normalized |Δ| = {dmag.max():.2f})")
+    ax.set_xlabel(xlab)
+    ax.set_ylabel(ylab)
 
     # Mean-force field: the gradient observations the GP integrates.
     ax = fig.add_subplot(gs[1, 2:4])
     ax.contourf(GX, GY, pmf, levels=20, cmap="viridis", alpha=0.35)
-    gmag = np.linalg.norm(grad, axis=1)
-    ax.quiver(centers[:, 0], centers[:, 1], grad[:, 0], grad[:, 1],
-              angles="xy", color=PALETTE["force"], width=0.006,
-              alpha=0.9)
-    ax.set_title(f"Mean-force ∇F  (mean |∇F| = {gmag.mean():.2f} {eu}/{cvu[0]})")
-    ax.set_xlabel(xlab); ax.set_ylabel(ylab)
+    # dF/d(x/ell) = ell*dF/dx has one common energy unit even when the two
+    # CV axes do not. Draw its direction in the dimensionless GP metric, then
+    # convert the display displacement back to the corresponding CV units.
+    scaled_grad = grad * ell
+    gmag = np.linalg.norm(scaled_grad, axis=1)
+    unit_direction = np.divide(
+        scaled_grad,
+        gmag[:, None],
+        out=np.zeros_like(scaled_grad),
+        where=gmag[:, None] > 0,
+    )
+    scaled_span = np.ptp(centers / ell, axis=0)
+    arrow_length = 0.12 * max(float(np.max(scaled_span)), 1.0)
+    arrows = unit_direction * ell * arrow_length
+    quiver = ax.quiver(
+        centers[:, 0], centers[:, 1], arrows[:, 0], arrows[:, 1], gmag,
+        angles="xy", scale_units="xy", scale=1.0, cmap="plasma", width=0.006,
+        alpha=0.9,
+    )
+    fig.colorbar(quiver, ax=ax, label=f"|ell · grad F| ({eu})")
+    ax.set_title(
+        f"Mean-force direction (mean metric magnitude = {gmag.mean():.2f} {eu})"
+    )
+    ax.set_xlabel(xlab)
+    ax.set_ylabel(ylab)
 
     # Autocorrelation time per window (max over the two CV components).
     ax = fig.add_subplot(gs[1, 4:6])
@@ -188,7 +223,8 @@ def plot_diagnostics_2d(results: dict, output_path: str | None = None,
     ax.scatter(means[:, 0], means[:, 1], c="k", s=3, zorder=5)
     ax.autoscale_view()
     ax.set_title("Window overlap (±1σ sampling)")
-    ax.set_xlabel(xlab); ax.set_ylabel(ylab)
+    ax.set_xlabel(xlab)
+    ax.set_ylabel(ylab)
 
     # Per-observation LOO z (2 per window: one per CV component).
     ax = fig.add_subplot(gs[2, 2:4])
@@ -228,8 +264,7 @@ def plot_diagnostics_2d(results: dict, output_path: str | None = None,
         f"ℓ = ({ell[0]:.3g}, {ell[-1]:.3g}) ({cvu[0]}, {cvu[1]})  ·  "
         f"PMF 0–{pmf.max():.3g} {eu}"
     )
-    if cal:
-        setup += f"  ·  calibrated σ = GP σ × {cal:.2f}"
+    setup += f"  ·  LOO-scaled σ = raw GP σ × {cal:.2f}"
     fig.text(0.5, 0.965, title, ha="center", va="top",
              fontsize=13, fontweight="bold")
     fig.text(0.5, 0.935, setup, ha="center", va="top",
@@ -244,14 +279,18 @@ def plot_diagnostics_2d(results: dict, output_path: str | None = None,
     return fig
 
 
-def plot_mep(results: dict, mep: dict, output_path: str | None = None,
-             output_prefix: str | None = None, show: bool = False):
-    """Two-panel MEP figure: the 2D PMF with the path, and the 1D profile.
+def plot_lowest_barrier_path(results: dict, path_result: dict,
+                             output_path: str | None = None,
+                             output_prefix: str | None = None,
+                             show: bool = False):
+    """Plot a lowest-barrier grid path and its 1D energy profile.
 
-    Left:  PMF contour, located minima, and the minimum-energy path with its
-           transition state marked.
-    Right: free energy along the path (relative to the start minimum) with the
-           calibrated ±1σ / ±2σ band and the barrier annotated.
+    Left:   PMF contour, located minima, and the lowest-barrier path with its
+            transition state marked.
+    Centre: free energy along the path (relative to the start minimum) with
+            the selected ±1σ / ±2σ uncertainty band.
+    Right:  when requested, the separately referenced path-aligned marginal
+            PMF obtained by perpendicular Boltzmann integration.
     """
     import matplotlib
     if not show:
@@ -260,14 +299,18 @@ def plot_mep(results: dict, mep: dict, output_path: str | None = None,
 
     apply_plot_style()
 
-    GX, GY, pmf = results["GX"], results["GY"], results["pmf"]
+    GX, GY = results["GX"], results["GY"]
+    pmf = np.ma.masked_where(~results["support_mask"], results["pmf"])
     centers = results["centers"]
-    cvn, cvu = mep["cv_names"], mep["cv_units"]
-    eu = mep["energy_unit"]
-    s, E_rel, sig = mep["s"], mep["pmf_rel"], mep["sigma"]
-    ts_s, barrier, berr = mep["ts_s"], mep["barrier"], mep["barrier_err"]
+    cvn, cvu = path_result["cv_names"], path_result["cv_units"]
+    eu = path_result["energy_unit"]
+    s, E_rel, sig = path_result["s"], path_result["pmf_rel"], path_result["sigma"]
+    ts_s = path_result["ts_s"]
+    barrier, berr = path_result["barrier"], path_result["barrier_err"]
+    marginal = path_result.get("path_aligned_marginal")
 
-    fig, axes = plt.subplots(1, 2, figsize=(14, 5.6))
+    ncols = 3 if marginal is not None else 2
+    fig, axes = plt.subplots(1, ncols, figsize=(19 if ncols == 3 else 14, 5.6))
     fig.subplots_adjust(top=0.82, bottom=0.22, wspace=0.28)
 
     # --- Left: surface + path ---------------------------------------------
@@ -278,47 +321,82 @@ def plot_mep(results: dict, mep: dict, output_path: str | None = None,
     ax.scatter(centers[:, 0], centers[:, 1], c="white", edgecolors="k",
                s=18, linewidths=0.4, alpha=0.5, zorder=4)
     fig.colorbar(cf, ax=ax, label=f"PMF ({eu})")
-    smooth = _chaikin(np.column_stack([mep["x"], mep["y"]]), iters=2)
+    smooth = _chaikin(np.column_stack([path_result["x"], path_result["y"]]), iters=2)
     ax.plot(smooth[:, 0], smooth[:, 1], color="black", linestyle="--",
-            linewidth=1.4, dash_capstyle="round", zorder=5, label="MEP")
-    ax.scatter(*mep["start_xy"], c=PALETTE["sampling"], edgecolors="k", s=70,
+            linewidth=1.4, dash_capstyle="round", zorder=5, label="lowest-barrier path")
+    ax.scatter(*path_result["start_xy"], c=PALETTE["sampling"], edgecolors="k", s=70,
                zorder=6, label="start")
-    ax.scatter(*mep["end_xy"], c=PALETTE["pmf"], edgecolors="k", s=70,
+    ax.scatter(*path_result["end_xy"], c=PALETTE["pmf"], edgecolors="k", s=70,
                zorder=6, label="end")
-    ax.scatter(*mep["ts_xy"], marker="*", c=PALETTE["warn"], edgecolors="k",
+    ax.scatter(*path_result["ts_xy"], marker="*", c=PALETTE["warn"], edgecolors="k",
                s=200, zorder=7, label="TS")
     ax.set_xlabel(f"{cvn[0]} ({cvu[0]})")
     ax.set_ylabel(f"{cvn[1]} ({cvu[1]})")
-    ax.set_title("Minimum-energy path")
+    ax.set_title("Lowest-barrier grid path")
     ax.legend(loc="best")
-    _annotate(ax, f"TS at ({mep['ts_xy'][0]:.2g}, {mep['ts_xy'][1]:.2g}) "
-                  f"{cvu[0]}   ·   {len(mep['minima'])} minima")
+    _annotate(ax, f"TS candidate: {path_result['ts_xy'][0]:.2g} {cvu[0]}, "
+                  f"{path_result['ts_xy'][1]:.2g} {cvu[1]}   ·   "
+                  f"{len(path_result['minima'])} minima")
 
     # --- Right: energy profile along the path -----------------------------
     ax = axes[1]
-    _band(ax, s, E_rel, sig, PALETTE["guide"], label="calibrated ±1σ / ±2σ")
-    ax.plot(s, E_rel, color="black", linewidth=1.8, label="ΔF along MEP")
+    sigma_label = path_result["default_uncertainty"]
+    _band(ax, s, E_rel, sig, PALETTE["guide"], label=f"{sigma_label} ±1σ / ±2σ")
+    ax.plot(s, E_rel, color="black", linewidth=1.8, label="ΔF along path")
     ax.axhline(0, color=PALETTE["guide"], linewidth=0.6, alpha=0.6)
     ax.axvline(ts_s, color=PALETTE["warn"], linestyle="--", linewidth=0.9,
                alpha=0.75)
     ax.scatter([ts_s], [barrier], marker="*", c=PALETTE["warn"],
                edgecolors="k", s=190, zorder=6, label="TS")
-    ax.set_xlabel(f"Path coordinate s ({cvu[0]})")
-    ax.set_ylabel(f"ΔF from start ({eu})")
-    ax.set_title("Free-energy profile along MEP")
+    ax.set_xlabel("Dimensionless metric arclength s")
+    ax.set_ylabel(f"Relative free energy ({eu})")
+    ax.set_title("Free energy along the grid path (start-referenced)")
     ax.legend(loc="best")
     _annotate(ax,
               f"barrier = {barrier:.3g} ± {berr:.2g} {eu}     "
-              f"ΔF = {mep['delta_f']:.3g} ± {mep['delta_f_err']:.2g} {eu}")
+              f"ΔF = {path_result['delta_f']:.3g} ± "
+              f"{path_result['delta_f_err']:.2g} {eu}")
+
+    if marginal is not None:
+        ax = axes[2]
+        _band(
+            ax,
+            marginal["s"],
+            marginal["pmf"],
+            marginal["sigma"],
+            PALETTE["pmf_band"],
+            label=f"{marginal['default_uncertainty']} ±1σ / ±2σ",
+        )
+        ax.plot(
+            marginal["s"],
+            marginal["pmf"],
+            color=PALETTE["pmf"],
+            linewidth=1.8,
+            label="A(s) - min A(s)",
+        )
+        ax.axhline(0, color=PALETTE["guide"], linewidth=0.6, alpha=0.6)
+        ax.set_xlabel("Dimensionless metric arclength s")
+        ax.set_ylabel(f"Marginal free energy ({eu})")
+        ax.set_title("Perpendicular Boltzmann marginal (minimum-referenced)")
+        ax.legend(loc="best")
+        _annotate(
+            ax,
+            f"kBT = {marginal['thermal_energy']:.3g} {eu}  ·  "
+            f"{int(np.median(marginal['perpendicular_samples']))} "
+            "median samples/station",
+        )
 
     # Header block (matches the diagnostics figure so the two read as a set)
-    title = "2D GPR minimum-energy path"
+    title = "2D GPR lowest-barrier path"
     if output_prefix:
         title = f"{title} — {output_prefix}"
     ell = np.atleast_1d(results["lengthscale"])
+    metric = np.atleast_1d(path_result["metric_scale"])
     setup = (
         f"{len(centers)} windows  ·  σ_f = {results['sigma_f']:.3g} {eu}  ·  "
-        f"ℓ = ({ell[0]:.3g}, {ell[-1]:.3g}) ({cvu[0]}, {cvu[1]})  ·  "
+        f"ℓ_GP = ({ell[0]:.3g} {cvu[0]}, {ell[-1]:.3g} {cvu[1]})  ·  "
+        f"path metric = ({metric[0]:.3g} {cvu[0]}, "
+        f"{metric[-1]:.3g} {cvu[1]})  ·  "
         f"minimax path over the GP surface"
     )
     fig.text(0.5, 0.965, title, ha="center", va="top",
