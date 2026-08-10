@@ -764,6 +764,9 @@ def reconstruct_pmf_2d(
         prior_cov_ref = _se(Xs[sl], Xs[[ref]], sigma_f, ell).ravel()
         posterior_cov_ref[sl] = prior_cov_ref - K_chunk @ solved_ref
     var_diff = f_var + f_var[ref] - 2.0 * posterior_cov_ref
+    # F(x_ref) - F(x_ref) is exactly zero.  Enforce that identity before the
+    # square root instead of exposing platform-dependent cancellation noise.
+    var_diff[ref] = 0.0
     pmf_std_raw = np.sqrt(np.clip(var_diff, 0, np.inf))
 
     # Leave one complete window (both correlated CV observations) out at a

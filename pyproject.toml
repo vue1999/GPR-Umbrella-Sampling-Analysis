@@ -4,15 +4,15 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "gpr-umbrella"
-version = "0.1.0"
-description = "Gaussian-process umbrella integration for 1D and 2D PLUMED data."
+version = "0.2.0"
+description = "Free-energy reconstruction and convergence diagnostics for umbrella, OPES, and metadynamics data."
 readme = "README.md"
 requires-python = ">=3.9"
 license = {text = "MIT"}
 authors = [
   {name = "Eszter Varga-Umbrich"}
 ]
-keywords = ["umbrella sampling", "gaussian process", "plumed", "pmf", "gpr"]
+keywords = ["umbrella sampling", "OPES", "metadynamics", "gaussian process", "plumed", "pmf", "gpr"]
 classifiers = [
   "Programming Language :: Python :: 3",
   "License :: OSI Approved :: MIT License",
@@ -27,6 +27,7 @@ dependencies = [
 [project.scripts]
 gpr-umbrella = "gpr_umbrella.cli_1d:main"
 gpr-umbrella-2d = "gpr_umbrella.cli_2d:main"
+gpr-biased = "gpr_umbrella.cli_biased:main"
 
 [project.optional-dependencies]
 test = ["pytest>=7"]
