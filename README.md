@@ -198,6 +198,61 @@ python examples/run_synthetic_2d_demo.py   # reconstructs a known 2D PMF
 
 ### Lowest-barrier paths and path-aligned marginal PMFs
 
+#### At a glance
+
+- **Enable path analysis:** `--find-lowest-barrier-path`.
+- **Choose the allowed path region:**
+  - `--path-mode search` (default): search anywhere in the connected valid
+    sampled region; do not supply `--path-reference`.
+  - `--path-mode corridor --path-reference neb_xy.dat
+    --path-corridor-radius R`: search only in the valid region within `R` of
+    the supplied trajectory.
+  - `--path-mode fixed --path-reference neb_xy.dat`: perform no graph search;
+    evaluate the supplied trajectory directly.
+- **Choose the endpoints for `search` or `corridor`:**
+  - Omit `--path-endpoints`: choose suitable minima automatically.
+  - `--path-endpoints X0 Y0 X1 Y1` (default endpoint behavior): move each
+    requested point to the deepest nearby valid grid-local minimum.
+  - `--path-endpoint-radius R`: set the endpoint-minimum search radius in GP
+    lengthscales; the default is `--support-radius`.
+  - `--no-adjust-path-endpoints`: use the restraint-window centre nearest each
+    requested endpoint instead of moving to a minimum.
+  - `fixed` mode always uses the first and last reference-trajectory points and
+    does not accept `--path-endpoints`.
+- **Choose the primary path objective:**
+  - `--path-uncertainty-weight 0` (default): minimize the mean-PMF bottleneck.
+  - `--path-uncertainty-weight BETA`, with `BETA > 0`: minimize the
+    upper-confidence bottleneck `mean dF + BETA * sigma(dF)`; `BETA=1` gives a
+    one-sigma risk-aware search.
+  - Uncertainty weighting works with `search` and `corridor`, but not with a
+    fixed trajectory because there is no path to select in `fixed` mode.
+- **Choose among paths with the same optimal bottleneck:**
+  - `--path-gradient-weight 1` (default): prefer gradient-aligned, MEP-like
+    paths.
+  - `--path-gradient-weight 0`: prefer the geometrically shortest path.
+  - Other non-negative values tune the gradient-alignment penalty.
+- **Choose the path metric:**
+  - By default, each CV is scaled by its fitted or fixed GP lengthscale.
+  - `--path-metric-scales SCALE0 SCALE1` overrides those physical scales.
+  - `--path-corridor-radius` is dimensionless in this path metric; for isotropic
+    metric scale `ell`, physical radius `r` corresponds to `R = r / ell`.
+  - `--path-endpoint-radius` is always measured in the GP-lengthscale metric,
+    independently of `--path-metric-scales`.
+- **Optional path-aligned 1D PMF:**
+  - `--path-aligned-marginal --thermal-energy KBT` computes the transverse
+    Boltzmann marginal `A(s)`.
+  - `--perpendicular-points N` and `--perpendicular-width W` control its
+    transverse quadrature.
+- **Validity rule:** endpoint relocation, free/corridor searches, fixed-path
+  evaluation, and transverse integration all stay inside the sampled,
+  non-red `path_valid` region. Invalid or disconnected requests fail explicitly.
+- **Reported quantities:** the barrier is `max(path PMF) - min(path PMF)`;
+  reaction `dF` is end minus start; uncertainties use the full GP posterior
+  covariance between the relevant points.
+
+The following sections describe these choices and their numerical meaning in
+more detail.
+
 By default, `find_lowest_barrier_path` finds the grid path whose highest PMF is
 as low as possible. It computes the exact minimax threshold, then minimizes an
 additive lengthscale-scaled path cost inside that exact sublevel set. The
