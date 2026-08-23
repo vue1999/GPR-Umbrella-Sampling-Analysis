@@ -435,7 +435,7 @@ def plot_lowest_barrier_path(results: dict, path_result: dict,
 
     Left:   PMF contour, located minima, and the lowest-barrier path with its
             transition state marked.
-    Centre: free energy along the path (relative to the start minimum) with
+    Centre: free energy along the path (relative to its visited minimum) with
             the selected ±1σ / ±2σ uncertainty band.
     Right:  when requested, the separately referenced path-aligned marginal
             PMF obtained by perpendicular Boltzmann integration.
@@ -454,7 +454,9 @@ def plot_lowest_barrier_path(results: dict, path_result: dict,
     means = results["means"]
     cvn, cvu = path_result["cv_names"], path_result["cv_units"]
     eu = path_result["energy_unit"]
-    s, E_rel, sig = path_result["s"], path_result["pmf_rel"], path_result["sigma"]
+    s = path_result["s"]
+    E_rel = path_result["pmf_rel_path_min"]
+    sig = path_result["sigma_from_path_min"]
     ts_s = path_result["ts_s"]
     barrier, berr = path_result["barrier"], path_result["barrier_err"]
     marginal = path_result.get("path_aligned_marginal")
@@ -500,6 +502,8 @@ def plot_lowest_barrier_path(results: dict, path_result: dict,
                zorder=6, label="end")
     ax.scatter(*path_result["ts_xy"], marker="*", c=PALETTE["warn"], edgecolors="k",
                s=200, zorder=7, label="TS")
+    ax.scatter(*path_result["path_min_xy"], marker="v", c=PALETTE["guide"],
+               edgecolors="k", s=65, zorder=7, label="path minimum")
     ax.set_xlabel(f"{cvn[0]} ({cvu[0]})")
     ax.set_ylabel(f"{cvn[1]} ({cvu[1]})")
     ax.set_title("Lowest-barrier grid path")
@@ -512,7 +516,7 @@ def plot_lowest_barrier_path(results: dict, path_result: dict,
     ax = axes[1]
     sigma_label = path_result["default_uncertainty"]
     _band(ax, s, E_rel, sig, PALETTE["guide"], label=f"{sigma_label} ±1σ / ±2σ")
-    ax.plot(s, E_rel, color="black", linewidth=1.8, label="ΔF along path")
+    ax.plot(s, E_rel, color="black", linewidth=1.8, label="PMF - path minimum")
     ax.axhline(0, color=PALETTE["guide"], linewidth=0.6, alpha=0.6)
     ax.axvline(ts_s, color=PALETTE["warn"], linestyle="--", linewidth=0.9,
                alpha=0.75)
@@ -520,10 +524,10 @@ def plot_lowest_barrier_path(results: dict, path_result: dict,
                edgecolors="k", s=190, zorder=6, label="TS")
     ax.set_xlabel("Dimensionless metric arclength s")
     ax.set_ylabel(f"Relative free energy ({eu})")
-    ax.set_title("Free energy along the grid path (start-referenced)")
+    ax.set_title("Free energy along the grid path (path-minimum-referenced)")
     ax.legend(loc="best")
     _annotate(ax,
-              f"barrier = {barrier:.3g} ± {berr:.2g} {eu}     "
+              f"barrier (max - min) = {barrier:.3g} ± {berr:.2g} {eu}     "
               f"ΔF = {path_result['delta_f']:.3g} ± "
               f"{path_result['delta_f_err']:.2g} {eu}")
 

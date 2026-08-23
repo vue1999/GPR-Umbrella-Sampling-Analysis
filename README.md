@@ -206,11 +206,15 @@ default dimensionless `gradient_alignment_weight=1.0` (CLI:
 `--path-gradient-weight 1.0`) penalizes motion perpendicular to the predicted
 free-energy gradient; weak-gradient regions are automatically downweighted.
 Set the weight to zero to recover the geometrically shortest minimax path.
-Thus the barrier and the chosen secondary objective are both globally optimal
-on the finite 8-neighbor grid graph. This is not a guarantee for the underlying
-continuous GPR surface between grid points, and the result remains an MEP-like
-minimum-bottleneck path rather than a string- or NEB-refined minimum-energy
-path:
+Thus the absolute bottleneck and the chosen secondary objective are both
+globally optimal on the finite 8-neighbor grid graph. The reported barrier is
+the PMF range on that selected path, `max(path PMF) - min(path PMF)`, and its
+uncertainty uses the posterior covariance between those two path points.
+Reaction ΔF remains end minus start. Because the visited minimum may lie away
+from the start, the reported range is not itself the graph-search objective.
+The grid result is not a guarantee for the underlying continuous GPR surface
+between grid points, and remains an MEP-like minimum-bottleneck path rather
+than a string- or NEB-refined minimum-energy path:
 
 ```python
 from gpr_umbrella import find_lowest_barrier_path

@@ -766,8 +766,10 @@ def find_lowest_barrier_path(
 ) -> dict:
     """Find a minimum-bottleneck path inside one path-valid component.
 
-    The barrier is minimized first. Among paths at that exact barrier, an
-    additive metric-length plus GP-gradient-misalignment cost is minimized.
+    The absolute PMF bottleneck is minimized first. Among paths at that exact
+    bottleneck, an additive metric-length plus GP-gradient-misalignment cost is
+    minimized. The reported barrier is the maximum minus the minimum PMF
+    visited by the selected path.
     Explicit endpoints are moved to the lowest nearby path-valid minima by
     default. With ``adjust_endpoints=False``, each endpoint instead uses the
     nearest restraint-window centre (snapped to the path grid).
@@ -974,7 +976,9 @@ def find_lowest_barrier_path(
     s = np.concatenate([[0.0], np.cumsum(ds)])
     energy = pmf[pi, pj]
     energy_relative = energy - energy[0]
-    ts = int(np.argmax(energy_relative))
+    path_minimum = int(np.argmin(energy))
+    energy_relative_to_minimum = energy - energy[path_minimum]
+    ts = int(np.argmax(energy))
 
     median_abs_gradient_cosine = None
     length_weighted_gradient_misalignment = None
@@ -1011,6 +1015,9 @@ def find_lowest_barrier_path(
     covariance_to_start = posterior_covariance_2d(
         results, points, points[[0]], calibrated=False
     ).ravel()
+    covariance_to_minimum = posterior_covariance_2d(
+        results, points, points[[path_minimum]], calibrated=False
+    ).ravel()
     latent_variance = results["latent_variance_raw"][pi, pj]
     relative_variance = np.clip(
         latent_variance + latent_variance[0] - 2.0 * covariance_to_start,
@@ -1020,8 +1027,23 @@ def find_lowest_barrier_path(
     relative_variance[0] = 0.0  # F(start) - F(start) is exactly known to be zero.
     sigma_raw = np.sqrt(relative_variance)
     sigma_calibrated = sigma_raw * results["loo_calibration_factor"]
+    minimum_relative_variance = np.clip(
+        latent_variance + latent_variance[path_minimum]
+        - 2.0 * covariance_to_minimum,
+        0,
+        np.inf,
+    )
+    minimum_relative_variance[path_minimum] = 0.0
+    sigma_from_minimum_raw = np.sqrt(minimum_relative_variance)
+    sigma_from_minimum_calibrated = (
+        sigma_from_minimum_raw * results["loo_calibration_factor"]
+    )
     use_calibrated = results["default_uncertainty"] == "calibrated"
     sigma_default = sigma_calibrated if use_calibrated else sigma_raw
+    sigma_from_minimum_default = (
+        sigma_from_minimum_calibrated
+        if use_calibrated else sigma_from_minimum_raw
+    )
 
     path_result = {
         "s": s,
@@ -1029,9 +1051,13 @@ def find_lowest_barrier_path(
         "y": py,
         "pmf": energy,
         "pmf_rel": energy_relative,
+        "pmf_rel_path_min": energy_relative_to_minimum,
         "sigma_raw": sigma_raw,
         "sigma_calibrated": sigma_calibrated,
         "sigma": sigma_default,
+        "sigma_from_path_min_raw": sigma_from_minimum_raw,
+        "sigma_from_path_min_calibrated": sigma_from_minimum_calibrated,
+        "sigma_from_path_min": sigma_from_minimum_default,
         "minima": minima,
         "nominal_start_xy": tuple(start_endpoint["nominal_xy"]),
         "nominal_end_xy": tuple(end_endpoint["nominal_xy"]),
@@ -1054,6 +1080,12 @@ def find_lowest_barrier_path(
         "end_xy": (float(px[-1]), float(py[-1])),
         "ts_xy": (float(px[ts]), float(py[ts])),
         "ts_s": float(s[ts]),
+        "path_min_index": path_minimum,
+        "path_min_xy": (
+            float(px[path_minimum]), float(py[path_minimum])
+        ),
+        "path_min_s": float(s[path_minimum]),
+        "path_min_pmf": float(energy[path_minimum]),
         "bottleneck_energy": float(np.max(energy)),
         "path_metric_length": float(s[-1]),
         "path_graph_connectivity": 8,
@@ -1067,10 +1099,12 @@ def find_lowest_barrier_path(
         "path_length_weighted_gradient_misalignment": (
             length_weighted_gradient_misalignment
         ),
-        "barrier": float(energy_relative[ts]),
-        "barrier_err_raw": float(sigma_raw[ts]),
-        "barrier_err_calibrated": float(sigma_calibrated[ts]),
-        "barrier_err": float(sigma_default[ts]),
+        "barrier": float(energy_relative_to_minimum[ts]),
+        "barrier_err_raw": float(sigma_from_minimum_raw[ts]),
+        "barrier_err_calibrated": float(
+            sigma_from_minimum_calibrated[ts]
+        ),
+        "barrier_err": float(sigma_from_minimum_default[ts]),
         "delta_f": float(energy_relative[-1]),
         "delta_f_err_raw": float(sigma_raw[-1]),
         "delta_f_err_calibrated": float(sigma_calibrated[-1]),
@@ -1126,6 +1160,7 @@ def save_lowest_barrier_path(path_result: dict, path: str) -> None:
                 f"{end['window_index']})\n"
             )
     tx, ty = path_result["ts_xy"]
+    mx, my = path_result["path_min_xy"]
     metric = np.asarray(path_result["metric_scale"], dtype=float)
     alignment_note = ""
     if path_result.get("path_median_abs_gradient_cosine") is not None:
@@ -1146,21 +1181,29 @@ def save_lowest_barrier_path(path_result: dict, path: str) -> None:
         f"{endpoint_note}"
         f"start = ({sx:.4f} {cvu[0]}, {sy:.4f} {cvu[1]})\n"
         f"end = ({ex:.4f} {cvu[0]}, {ey:.4f} {cvu[1]})\n"
+        f"path minimum = ({mx:.4f} {cvu[0]}, {my:.4f} {cvu[1]}) "
+        f"at dimensionless metric arclength s = {path_result['path_min_s']:.4f}\n"
         f"transition-state candidate = ({tx:.4f} {cvu[0]}, {ty:.4f} {cvu[1]}) "
         f"at dimensionless metric arclength s = {path_result['ts_s']:.4f}\n"
-        f"barrier = {path_result['barrier']:.4f} {eu}; "
+        f"barrier = max(path PMF) - min(path PMF) = "
+        f"{path_result['barrier']:.4f} {eu}; "
         f"sigma_raw = {path_result['barrier_err_raw']:.4f} {eu}; "
         f"sigma_calibrated = {path_result['barrier_err_calibrated']:.4f} {eu}\n"
         f"reaction dF = {path_result['delta_f']:.4f} {eu}; "
         f"sigma_raw = {path_result['delta_f_err_raw']:.4f} {eu}; "
         f"sigma_calibrated = {path_result['delta_f_err_calibrated']:.4f} {eu}\n"
         f"s(metric_arclength) {cvn[0]}({cvu[0]}) {cvn[1]}({cvu[1]}) "
-        f"PMF({eu}) PMF_rel_start({eu}) sigma_raw({eu}) sigma_calibrated({eu})"
+        f"PMF({eu}) PMF_rel_start({eu}) sigma_from_start_raw({eu}) "
+        f"sigma_from_start_calibrated({eu}) PMF_rel_path_min({eu}) "
+        f"sigma_from_path_min_raw({eu}) sigma_from_path_min_calibrated({eu})"
     )
     data = np.column_stack([
         path_result["s"], path_result["x"], path_result["y"],
         path_result["pmf"], path_result["pmf_rel"],
         path_result["sigma_raw"], path_result["sigma_calibrated"],
+        path_result["pmf_rel_path_min"],
+        path_result["sigma_from_path_min_raw"],
+        path_result["sigma_from_path_min_calibrated"],
     ])
     np.savetxt(path, data, header=header, fmt="%.6f")
 

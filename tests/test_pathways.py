@@ -177,12 +177,12 @@ def test_supported_segment_stops_at_an_internal_gap():
     np.testing.assert_array_equal(kept_coordinate, np.array([0.0, 1.0, 2.0]))
 
 
-def test_barrier_error_uses_gp_covariance_with_the_start():
-    """A correlated common GP mode must cancel from a relative barrier."""
-    gx = np.array([0.0, 1.0, 2.0])
+def test_barrier_uses_path_range_and_covariance_between_extrema():
+    """Barrier and uncertainty are referenced to the lowest visited point."""
+    gx = np.array([0.0, 1.0, 2.0, 3.0])
     gy = np.array([0.0])
     # A remote derivative observation leaves an almost-prior, strongly
-    # correlated surface over these three nearby query points.
+    # correlated surface over these nearby query points.
     state = _gp_state(
         [[100.0, 100.0]], [[0.0, 0.0]], sigma_f=1.0,
         lengthscale=(5.0, 5.0),
@@ -192,8 +192,8 @@ def test_barrier_error_uses_gp_covariance_with_the_start():
     results = {
         "gx": gx,
         "gy": gy,
-        "pmf": np.array([[0.0], [1.0], [0.2]]),
-        "support_mask": np.ones((3, 1), dtype=bool),
+        "pmf": np.array([[0.3], [1.0], [-0.2], [0.1]]),
+        "support_mask": np.ones((4, 1), dtype=bool),
         "support_radius": 0.01,
         "latent_variance_raw": np.diag(covariance)[:, None],
         "lengthscale": np.array([5.0, 5.0]),
@@ -206,13 +206,19 @@ def test_barrier_error_uses_gp_covariance_with_the_start():
     }
 
     path = find_lowest_barrier_path(
-        results, endpoints=((0.0, 0.0), (2.0, 0.0))
+        results, endpoints=((0.0, 0.0), (3.0, 0.0))
     )
     expected_raw = np.sqrt(
-        covariance[1, 1] + covariance[0, 0] - 2.0 * covariance[1, 0]
+        covariance[1, 1] + covariance[2, 2] - 2.0 * covariance[1, 2]
     )
-    independent_error = np.sqrt(covariance[1, 1] + covariance[0, 0])
+    independent_error = np.sqrt(covariance[1, 1] + covariance[2, 2])
 
+    assert path["path_min_index"] == 2
+    assert path["path_min_xy"] == pytest.approx((2.0, 0.0))
+    assert path["barrier"] == pytest.approx(1.2)
+    assert path["delta_f"] == pytest.approx(-0.2)
+    np.testing.assert_allclose(path["pmf_rel_path_min"], [0.5, 1.2, 0.0, 0.3])
+    assert path["sigma_from_path_min_raw"][2] == 0.0
     assert path["barrier_err_raw"] == pytest.approx(expected_raw)
     assert path["barrier_err_calibrated"] == pytest.approx(2.0 * expected_raw)
     assert path["barrier_err"] == pytest.approx(2.0 * expected_raw)
