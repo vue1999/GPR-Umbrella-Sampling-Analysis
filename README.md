@@ -167,6 +167,19 @@ autocorrelation time; window-overlap ellipses, per-observation LOO z-scores,
 and the LOO calibration histogram). Pass `plot_diagnostics=False`
 (CLI: `--no-diagnostics`) to skip it.
 
+The 2D colour scale is anchored to the observation locations rather than to
+the most extreme grid cell. The plotted PMF is referenced to its minimum at a
+sampled window mean, and the normal colour range contains the full min--max
+range evaluated at all sampled means plus a 10--25% margin. The margin includes
+local calibrated uncertainty but is capped so that uncertainty cannot flatten
+the PMF contrast. Raw and calibrated uncertainty panels similarly include all
+values at window means plus 25%. Supported cells outside these display ranges
+are retained but colored red; cells outside sampled support remain blank. This
+is only a plotting rule: saved PMF values, path selection, and barriers are
+unchanged. A logarithmic PMF scale is deliberately avoided because free-energy
+differences and barriers are additive quantities and a log transform would
+distort them.
+
 By default, the PMF reference, plots, path search, and transverse integration
 are restricted to the union of kernel-scaled neighborhoods around the sampled
 window means. `support_radius=0.5` (CLI: `--support-radius 0.5`) gives each

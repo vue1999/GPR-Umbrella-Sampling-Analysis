@@ -6,8 +6,96 @@ import numpy as np
 from .plotting_1d import PALETTE, apply_plot_style, _band, _annotate
 
 
-def plot_pmf_2d(results: dict, output_path: str | None = None, show: bool = False):
-    """Plot the reconstructed PMF plus raw and LOO-scaled uncertainties."""
+def _values_at_window_means(results: dict, field: np.ndarray) -> np.ndarray:
+    """Interpolate a gridded field at the GP observation locations."""
+    from scipy.interpolate import RegularGridInterpolator
+
+    interpolator = RegularGridInterpolator(
+        (results["gx"], results["gy"]), np.asarray(field, dtype=float),
+        bounds_error=False, fill_value=np.nan,
+    )
+    values = np.asarray(interpolator(results["means"]), dtype=float)
+    values = values[np.isfinite(values)]
+    if values.size == 0:
+        raise ValueError("No finite grid values at the sampled window means")
+    return values
+
+
+def _window_anchored_display_policy(results: dict) -> dict:
+    """Choose robust, observation-anchored colour limits for 2D fields.
+
+    The GP is constrained by mean-force observations at the sampled window
+    means, whereas large excursions near the edge of sampled support are much
+    more extrapolative. The normal PMF colour range therefore contains the
+    complete min--max range at the window means, with a 10--25% margin. The
+    uncertainty panels similarly contain every uncertainty evaluated at a
+    window mean. Values beyond these limits are retained and drawn with the
+    warning colour; this policy changes only the visualization.
+    """
+    pmf_at_means = _values_at_window_means(results, results["pmf"])
+    reference = float(np.min(pmf_at_means))
+    span = float(np.ptp(pmf_at_means))
+
+    calibrated_at_means = _values_at_window_means(
+        results, results["pmf_std_calibrated"]
+    )
+    typical_sigma = float(np.median(calibrated_at_means))
+    if span > 1e-12:
+        # Uncertainty can widen the padding, but never dominate the PMF scale.
+        padding = max(0.10 * span, min(2.0 * typical_sigma, 0.25 * span))
+    else:
+        padding = max(2.0 * typical_sigma, 1e-9)
+
+    uncertainty_limits = {}
+    for key in ("pmf_std_raw", "pmf_std_calibrated"):
+        at_means = _values_at_window_means(results, results[key])
+        uncertainty_limits[key] = (0.0, max(1.25 * float(np.max(at_means)), 1e-9))
+
+    return {
+        "pmf_reference": reference,
+        "pmf": np.asarray(results["pmf"], dtype=float) - reference,
+        "pmf_limits": (-padding, span + padding),
+        "uncertainty_limits": uncertainty_limits,
+    }
+
+
+def _bounded_contourf(ax, GX, GY, values, limits, cmap_name, *,
+                      levels=30, warn_below=True, alpha=1.0):
+    """Draw fixed-level contours and mark values beyond the limits in red."""
+    import matplotlib.pyplot as plt
+
+    lower, upper = limits
+    contour_levels = np.linspace(lower, upper, levels)
+    cmap = plt.get_cmap(cmap_name).copy()
+    cmap.set_over(PALETTE["warn"])
+    extend = "max"
+    if warn_below:
+        cmap.set_under(PALETTE["warn"])
+        extend = "both"
+    return ax.contourf(
+        GX, GY, values, levels=contour_levels, cmap=cmap, extend=extend,
+        alpha=alpha,
+    )
+
+
+def _bounded_contours(ax, GX, GY, values, limits, *, levels=15, alpha=0.4):
+    """Draw contour lines only within the normal display interval."""
+    lower, upper = limits
+    line_levels = np.linspace(lower, upper, levels + 2)[1:-1]
+    return ax.contour(
+        GX, GY, values, levels=line_levels, colors="k", linewidths=0.3,
+        alpha=alpha,
+    )
+
+
+def plot_pmf_2d(results: dict, output_path: str | None = None,
+                show: bool = False, show_targets: bool = True):
+    """Plot the reconstructed PMF plus raw and LOO-scaled uncertainties.
+
+    Sampled window means are the GP observation locations and therefore the
+    primary markers.  When *show_targets* is true, restraint targets are also
+    shown as faint crosses to provide drift context.
+    """
     import matplotlib
     if not show:
         matplotlib.use("Agg")
@@ -15,31 +103,60 @@ def plot_pmf_2d(results: dict, output_path: str | None = None, show: bool = Fals
 
     GX, GY = results["GX"], results["GY"]
     mask = ~results["support_mask"]
-    pmf = np.ma.masked_where(mask, results["pmf"])
+    display = _window_anchored_display_policy(results)
+    pmf = np.ma.masked_where(mask, display["pmf"])
     pmf_std_raw = np.ma.masked_where(mask, results["pmf_std_raw"])
     pmf_std_calibrated = np.ma.masked_where(mask, results["pmf_std_calibrated"])
     centers = results["centers"]
+    means = results["means"]
     cvn, cvu = results["cv_names"], results["cv_units"]
     eu = results["energy_unit"]
 
     fig, axes = plt.subplots(1, 3, figsize=(18, 5.2))
 
-    cf = axes[0].contourf(GX, GY, pmf, levels=30, cmap="viridis")
-    axes[0].contour(GX, GY, pmf, levels=15, colors="k", linewidths=0.3, alpha=0.4)
-    axes[0].scatter(centers[:, 0], centers[:, 1], c="white", edgecolors="k",
-                    s=28, label="window centres")
-    fig.colorbar(cf, ax=axes[0], label=f"PMF ({eu})")
-    axes[0].set_title("2D PMF (GPR umbrella integration)")
+    cf = _bounded_contourf(
+        axes[0], GX, GY, pmf, display["pmf_limits"], "viridis"
+    )
+    _bounded_contours(axes[0], GX, GY, pmf, display["pmf_limits"])
+    _window_scatter(
+        axes[0], means, centers, mean_color="white", mean_size=28,
+        show_targets=show_targets,
+    )
+    fig.colorbar(
+        cf, ax=axes[0],
+        label=f"PMF − sampled-window minimum ({eu}); red = outside display range",
+    )
+    axes[0].set_title("2D PMF (window-anchored display)")
     axes[0].legend(loc="upper right", fontsize=8)
 
-    cs = axes[1].contourf(GX, GY, pmf_std_raw, levels=30, cmap="magma")
-    axes[1].scatter(centers[:, 0], centers[:, 1], c="cyan", edgecolors="k", s=18)
-    fig.colorbar(cs, ax=axes[1], label=f"PMF uncertainty ({eu})")
+    cs = _bounded_contourf(
+        axes[1], GX, GY, pmf_std_raw,
+        display["uncertainty_limits"]["pmf_std_raw"], "magma",
+        warn_below=False,
+    )
+    _window_scatter(
+        axes[1], means, centers, mean_color="cyan", mean_size=18,
+        show_targets=show_targets,
+    )
+    fig.colorbar(
+        cs, ax=axes[1],
+        label=f"PMF uncertainty ({eu}); red = above display range",
+    )
     axes[1].set_title("Raw GP 1σ uncertainty")
 
-    cs = axes[2].contourf(GX, GY, pmf_std_calibrated, levels=30, cmap="magma")
-    axes[2].scatter(centers[:, 0], centers[:, 1], c="cyan", edgecolors="k", s=18)
-    fig.colorbar(cs, ax=axes[2], label=f"PMF uncertainty ({eu})")
+    cs = _bounded_contourf(
+        axes[2], GX, GY, pmf_std_calibrated,
+        display["uncertainty_limits"]["pmf_std_calibrated"], "magma",
+        warn_below=False,
+    )
+    _window_scatter(
+        axes[2], means, centers, mean_color="cyan", mean_size=18,
+        show_targets=show_targets,
+    )
+    fig.colorbar(
+        cs, ax=axes[2],
+        label=f"PMF uncertainty ({eu}); red = above display range",
+    )
     factor = results["loo_calibration_factor"]
     axes[2].set_title(f"LOO-scaled 1σ uncertainty (×{factor:.2f})")
 
@@ -71,17 +188,36 @@ def _chaikin(pts, iters=2):
     return pts
 
 
-def _window_scatter(ax, centers, cmap="viridis"):
-    """Overlay window centres coloured by index (low→high)."""
-    n = len(centers)
-    ax.scatter(centers[:, 0], centers[:, 1],
-               c=np.arange(n), cmap=cmap, s=18,
-               edgecolors="k", linewidths=0.4, zorder=5)
+def _window_scatter(ax, means, centers=None, cmap="viridis", *,
+                    mean_color=None, mean_size=18, show_targets=True):
+    """Overlay GP observation locations and optional restraint targets.
+
+    The derivative observations passed to the GP live at the sampled means,
+    not at the nominal restraint targets.  Means are therefore drawn as the
+    prominent circular markers.  Targets, when requested, are faint crosses
+    intended only to make target-to-mean drift visible.
+    """
+    means = np.asarray(means)
+    n = len(means)
+    if show_targets and centers is not None:
+        centers = np.asarray(centers)
+        ax.scatter(
+            centers[:, 0], centers[:, 1], marker="x", color=PALETTE["guide"],
+            s=max(16, 0.8 * mean_size), linewidths=0.7, alpha=0.38,
+            zorder=4, label="restraint targets",
+        )
+    colors = np.arange(n) if mean_color is None else mean_color
+    return ax.scatter(
+        means[:, 0], means[:, 1], c=colors,
+        cmap=cmap if mean_color is None else None,
+        s=mean_size, edgecolors="k", linewidths=0.4, zorder=5,
+        label="sampled means (GP observations)",
+    )
 
 
 def plot_diagnostics_2d(results: dict, output_path: str | None = None,
                         output_prefix: str | None = None,
-                        show: bool = False):
+                        show: bool = False, show_targets: bool = True):
     """Eight-panel diagnostics figure for 2D GPR umbrella integration.
 
     Layout (3 rows):
@@ -106,7 +242,8 @@ def plot_diagnostics_2d(results: dict, output_path: str | None = None,
 
     GX, GY = results["GX"], results["GY"]
     mask = ~results["support_mask"]
-    pmf = np.ma.masked_where(mask, results["pmf"])
+    display = _window_anchored_display_policy(results)
+    pmf = np.ma.masked_where(mask, display["pmf"])
     uncertainty_key = f"pmf_std_{results['default_uncertainty']}"
     pmf_std = np.ma.masked_where(mask, results[uncertainty_key])
     centers = results["centers"]
@@ -132,19 +269,28 @@ def plot_diagnostics_2d(results: dict, output_path: str | None = None,
     # Row 1 — reconstructed surface (large)
     # ------------------------------------------------------------------
     ax = fig.add_subplot(gs[0, 0:3])
-    cf = ax.contourf(GX, GY, pmf, levels=30, cmap="viridis")
-    ax.contour(GX, GY, pmf, levels=15, colors="k", linewidths=0.3, alpha=0.35)
-    _window_scatter(ax, centers)
-    fig.colorbar(cf, ax=ax, label=f"PMF ({eu})")
-    ax.set_title("2D PMF (GPR umbrella integration)")
+    cf = _bounded_contourf(ax, GX, GY, pmf, display["pmf_limits"], "viridis")
+    _bounded_contours(ax, GX, GY, pmf, display["pmf_limits"], alpha=0.35)
+    _window_scatter(ax, means, centers, show_targets=show_targets)
+    fig.colorbar(
+        cf, ax=ax,
+        label=f"PMF − sampled-window minimum ({eu}); red = outside display range",
+    )
+    ax.set_title("2D PMF (window-anchored display)")
+    ax.legend(loc="upper right", fontsize=7)
     ax.set_xlabel(xlab)
     ax.set_ylabel(ylab)
 
     ax = fig.add_subplot(gs[0, 3:6])
-    cs = ax.contourf(GX, GY, pmf_std, levels=30, cmap="magma")
-    ax.scatter(centers[:, 0], centers[:, 1], c="cyan", edgecolors="k",
-               s=16, linewidths=0.4)
-    fig.colorbar(cs, ax=ax, label=f"σ ({eu})")
+    cs = _bounded_contourf(
+        ax, GX, GY, pmf_std, display["uncertainty_limits"][uncertainty_key],
+        "magma", warn_below=False,
+    )
+    _window_scatter(
+        ax, means, centers, mean_color="cyan", mean_size=16,
+        show_targets=show_targets,
+    )
+    fig.colorbar(cs, ax=ax, label=f"σ ({eu}); red = above display range")
     band = f"{results['default_uncertainty']} 1σ"
     ax.set_title(f"Uncertainty ({band})")
     ax.set_xlabel(xlab)
@@ -161,14 +307,20 @@ def plot_diagnostics_2d(results: dict, output_path: str | None = None,
     ax.quiver(centers[:, 0], centers[:, 1], drift[:, 0], drift[:, 1],
               dmag, cmap="plasma", angles="xy", scale_units="xy", scale=1.0,
               width=0.006, alpha=0.9)
-    ax.scatter(centers[:, 0], centers[:, 1], c=PALETTE["guide"], s=6, zorder=5)
+    _window_scatter(
+        ax, means, centers, mean_color="white", mean_size=18,
+        show_targets=show_targets,
+    )
     ax.set_title(f"Window drift  (max normalized |Δ| = {dmag.max():.2f})")
     ax.set_xlabel(xlab)
     ax.set_ylabel(ylab)
 
     # Mean-force field: the gradient observations the GP integrates.
     ax = fig.add_subplot(gs[1, 2:4])
-    ax.contourf(GX, GY, pmf, levels=20, cmap="viridis", alpha=0.35)
+    _bounded_contourf(
+        ax, GX, GY, pmf, display["pmf_limits"], "viridis",
+        levels=20, alpha=0.35,
+    )
     # dF/d(x/ell) = ell*dF/dx has one common energy unit even when the two
     # CV axes do not. Draw its direction in the dimensionless GP metric, then
     # convert the display displacement back to the corresponding CV units.
@@ -180,17 +332,22 @@ def plot_diagnostics_2d(results: dict, output_path: str | None = None,
         out=np.zeros_like(scaled_grad),
         where=gmag[:, None] > 0,
     )
-    scaled_span = np.ptp(centers / ell, axis=0)
+    scaled_span = np.ptp(means / ell, axis=0)
     arrow_length = 0.12 * max(float(np.max(scaled_span)), 1.0)
     arrows = unit_direction * ell * arrow_length
     quiver = ax.quiver(
-        centers[:, 0], centers[:, 1], arrows[:, 0], arrows[:, 1], gmag,
+        means[:, 0], means[:, 1], arrows[:, 0], arrows[:, 1], gmag,
         angles="xy", scale_units="xy", scale=1.0, cmap="plasma", width=0.006,
-        alpha=0.9,
+        alpha=0.9, label="mean-force observations",
+    )
+    _window_scatter(
+        ax, means, centers, mean_color="white", mean_size=13,
+        show_targets=show_targets,
     )
     fig.colorbar(quiver, ax=ax, label=f"|ell · grad F| ({eu})")
     ax.set_title(
-        f"Mean-force direction (mean metric magnitude = {gmag.mean():.2f} {eu})"
+        f"Mean-force direction at sampled means "
+        f"(mean metric magnitude = {gmag.mean():.2f} {eu})"
     )
     ax.set_xlabel(xlab)
     ax.set_ylabel(ylab)
@@ -262,7 +419,8 @@ def plot_diagnostics_2d(results: dict, output_path: str | None = None,
     setup = (
         f"{N} windows  ·  σ_f = {results['sigma_f']:.3g} {eu}  ·  "
         f"ℓ = ({ell[0]:.3g}, {ell[-1]:.3g}) ({cvu[0]}, {cvu[1]})  ·  "
-        f"PMF 0–{pmf.max():.3g} {eu}"
+        f"PMF display {display['pmf_limits'][0]:.3g}–"
+        f"{display['pmf_limits'][1]:.3g} {eu} (window-anchored)"
     )
     setup += f"  ·  LOO-scaled σ = raw GP σ × {cal:.2f}"
     fig.text(0.5, 0.965, title, ha="center", va="top",
@@ -282,7 +440,8 @@ def plot_diagnostics_2d(results: dict, output_path: str | None = None,
 def plot_lowest_barrier_path(results: dict, path_result: dict,
                              output_path: str | None = None,
                              output_prefix: str | None = None,
-                             show: bool = False):
+                             show: bool = False,
+                             show_targets: bool = True):
     """Plot a lowest-barrier grid path and its 1D energy profile.
 
     Left:   PMF contour, located minima, and the lowest-barrier path with its
@@ -300,8 +459,10 @@ def plot_lowest_barrier_path(results: dict, path_result: dict,
     apply_plot_style()
 
     GX, GY = results["GX"], results["GY"]
-    pmf = np.ma.masked_where(~results["support_mask"], results["pmf"])
+    display = _window_anchored_display_policy(results)
+    pmf = np.ma.masked_where(~results["support_mask"], display["pmf"])
     centers = results["centers"]
+    means = results["means"]
     cvn, cvu = path_result["cv_names"], path_result["cv_units"]
     eu = path_result["energy_unit"]
     s, E_rel, sig = path_result["s"], path_result["pmf_rel"], path_result["sigma"]
@@ -316,11 +477,16 @@ def plot_lowest_barrier_path(results: dict, path_result: dict,
     # --- Left: surface + path ---------------------------------------------
     ax = axes[0]
     ax.grid(False)
-    cf = ax.contourf(GX, GY, pmf, levels=30, cmap="viridis")
-    ax.contour(GX, GY, pmf, levels=15, colors="k", linewidths=0.3, alpha=0.4)
-    ax.scatter(centers[:, 0], centers[:, 1], c="white", edgecolors="k",
-               s=18, linewidths=0.4, alpha=0.5, zorder=4)
-    fig.colorbar(cf, ax=ax, label=f"PMF ({eu})")
+    cf = _bounded_contourf(ax, GX, GY, pmf, display["pmf_limits"], "viridis")
+    _bounded_contours(ax, GX, GY, pmf, display["pmf_limits"])
+    _window_scatter(
+        ax, means, centers, mean_color="white", mean_size=18,
+        show_targets=show_targets,
+    )
+    fig.colorbar(
+        cf, ax=ax,
+        label=f"PMF − sampled-window minimum ({eu}); red = outside display range",
+    )
     smooth = _chaikin(np.column_stack([path_result["x"], path_result["y"]]), iters=2)
     ax.plot(smooth[:, 0], smooth[:, 1], color="black", linestyle="--",
             linewidth=1.4, dash_capstyle="round", zorder=5, label="lowest-barrier path")
