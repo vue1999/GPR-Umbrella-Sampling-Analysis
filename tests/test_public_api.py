@@ -9,7 +9,7 @@ import numpy as np
 import pytest
 
 import gpr_umbrella
-from gpr_umbrella import cli_1d, cli_2d
+from gpr_umbrella import cli_1d, cli_2d, cli_biased
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -31,12 +31,23 @@ def _quoted_assignment(section: str, key: str) -> str:
     return match.group(1)
 
 
-def test_public_api_is_exactly_the_supported_functions() -> None:
+def test_public_api_contains_the_supported_reconstruction_functions() -> None:
     expected = [
         "reconstruct_pmf_1d",
         "reconstruct_pmf_2d",
         "find_lowest_barrier_path",
         "sampled_support_mask",
+        "fit_gradient_gp",
+        "fit_icf_gp",
+        "predict_gradient_gp",
+        "posterior_covariance_gradient_gp",
+        "reconstruct_pmf_icf",
+        "analyze_opes_1d",
+        "analyze_metadynamics",
+        "block_reweighted_pmf_1d",
+        "region_weight_diagnostics",
+        "pmf_landmarks_1d",
+        "detect_hysteretic_transitions",
     ]
     assert gpr_umbrella.__all__ == expected
     for name in expected:
@@ -54,6 +65,19 @@ def test_distribution_name_and_console_script_targets() -> None:
     assert _quoted_assignment(scripts, "gpr-umbrella-2d") == (
         "gpr_umbrella.cli_2d:main"
     )
+    assert _quoted_assignment(scripts, "gpr-biased") == (
+        "gpr_umbrella.cli_biased:main"
+    )
+
+
+
+def test_readme_cites_the_adaptive_bias_icf_gpr_paper() -> None:
+    readme = (ROOT / "README.md").read_text(encoding="utf-8")
+    icf_section = readme.split("## ICF/GPR for OPES or metadynamics", 1)[1]
+    icf_section = icf_section.split("## Reading convergence evidence", 1)[0]
+    assert "Mones, N. Bernstein, and G. Csányi" in icf_section
+    assert "10.1021/acs.jctc.6b00553" in icf_section
+    assert "../ct6b00553.pdf" in icf_section
 
 
 def test_cli_help_parses_successfully(capsys: pytest.CaptureFixture[str]) -> None:
@@ -71,6 +95,14 @@ def test_cli_help_parses_successfully(capsys: pytest.CaptureFixture[str]) -> Non
     assert "--path-aligned-marginal" in help_text
     assert "--thermal-energy" in help_text
     assert "--restrict-to-sampled-support" in help_text
+
+    with pytest.raises(SystemExit) as biased_help:
+        cli_biased.build_parser().parse_args(["--help"])
+    assert biased_help.value.code == 0
+    biased_help_text = capsys.readouterr().out
+    assert "opes" in biased_help_text
+    assert "metad" in biased_help_text
+    assert "icf" in biased_help_text
 
 
 def test_2d_path_options_are_exposed_and_find_mep_is_retired() -> None:

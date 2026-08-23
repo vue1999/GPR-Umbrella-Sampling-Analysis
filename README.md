@@ -1,16 +1,26 @@
-# GPR Umbrella Integration
+# GPR Free-Energy Analysis
 
-Gaussian-process regression (GPR) umbrella integration for one- and
-two-dimensional PLUMED umbrella-sampling outputs. This package implements the method described in
+Free-energy reconstruction and convergence diagnostics for PLUMED umbrella,
+OPES, and metadynamics simulations. The original umbrella interfaces remain
+backward compatible, while adaptive-bias estimators use a shared named-field
+PLUMED parser and a bias-independent derivative-observation Gaussian process.
+
+The umbrella implementation follows
 
 > T. Stecher, N. Bernstein, and G. Csányi, "Free Energy Surface Reconstruction from Umbrella Samples Using Gaussian Process Regression," *J. Chem. Theory Comput.* **2014**, *10* (9), 4079–4097. [doi:10.1021/ct500438v](https://doi.org/10.1021/ct500438v)
 
-and is tailored to PLUMED `window_*.ui_dat` files. Specifically, it implements the
-gradient-based reconstruction variant referred to as **GPR(d)** in that paper:
+and implements the gradient-based reconstruction variant referred to as
+**GPR(d)** in that paper:
 mean forces are estimated per umbrella window (Sec. 2.3, eq 15), their statistical
 noise is propagated into the likelihood (Sec. 4, eq 37), and the free-energy profile
 is reconstructed by GPR on the derivative observations using a squared-exponential
 kernel (Sec. 4–4.1).
+
+The ICF route follows Mones, Bernstein, and Csányi (2016): an adaptive bias is
+used for exploration, the unbiased instantaneous collective force (ICF) is the
+local observable, and GPR reconstructs a scalar free-energy surface from those
+gradient observations. Direct OPES/MTD density reweighting and PLUMED
+`sum_hills` are deliberately kept as separate estimators.
 
 ## Features
 
@@ -24,6 +34,32 @@ kernel (Sec. 4–4.1).
 - Generates a multi-panel diagnostics figure
 - Reads raw PLUMED COLVAR files directly (no preprocessing required)
 - Configurable units (energy, collective-variable axis)
+- Parses named PLUMED fields across repeated restart headers
+- Reweights OPES with the instantaneous total bias while excluding `opes.rct`
+- Reweights metadynamics from an explicit log weight or normalized `*.rbias`
+- Reports global/local importance ESS and maximum single-frame leverage
+- Compares cumulative and disjoint time-block free-energy estimates
+- Detects hysteretic basin transitions and completed round trips
+- Reconstructs 1D or 2D PMFs from explicit paper-convention ICF observations
+- Records Equation 8, quasi-equilibrium, physical-force, and metric assumptions
+- Delegates HILLS reconstruction to `plumed sum_hills` through a shell-free API
+
+## Estimator architecture
+
+The package does not treat every biased trajectory as the same statistical
+problem:
+
+| Route | Observable supplied to reconstruction | Main validity requirement |
+|---|---|---|
+| Umbrella GPR(d) | Window mean force | Equilibrated stationary harmonic windows |
+| OPES density | `exp(beta * total instantaneous bias)` weights | Every applied bias is included; usable local weight support |
+| MTD density | Explicit log weight or normalized `bias - c(t)` (`*.rbias`) | Raw time-dependent bias is not silently accepted |
+| MTD HILLS | Bias history evaluated by PLUMED | Correct PLUMED action and HILLS semantics |
+| OPES/MTD ICF-GPR | `grad A = -conditional_mean(ICF)` | Valid physical ICF and equilibrium/quasi-equilibrium conditional sampling |
+
+GPR uncertainty describes reconstruction from the supplied observations. It is
+not, by itself, evidence that an adaptive simulation has equilibrated or that
+hidden slow coordinates were sampled.
 
 ## Installation
 
@@ -158,8 +194,8 @@ from gpr_umbrella import reconstruct_pmf_2d
 res = reconstruct_pmf_2d(colvar_dir="COLVAR", kappa_dir="COLVAR")
 ```
 
-Outputs: `*_pmf_2d.dat` (cv0, cv1, PMF, raw sigma, calibrated sigma,
-sampling-support flag, and path-valid flag on a grid),
+Outputs: `*_pmf_2d.dat` (cv0, cv1, PMF, raw sigma, calibrated sigma, and a
+sampling-support flag on a grid),
 `*_pmf_2d.png` (PMF contour + uncertainty, window centres overlaid) and
 `*_diagnostics_2d.png` — an 8-panel sampling/fit diagnostics figure (PMF and
 calibrated uncertainty; window drift centre→mean, mean-force field, and
@@ -167,28 +203,13 @@ autocorrelation time; window-overlap ellipses, per-observation LOO z-scores,
 and the LOO calibration histogram). Pass `plot_diagnostics=False`
 (CLI: `--no-diagnostics`) to skip it.
 
-The 2D colour scale is anchored to the observation locations rather than to
-the most extreme grid cell. The plotted PMF is referenced to its minimum at a
-sampled window mean, and the normal colour range contains the full min--max
-range evaluated at all sampled means plus a 25% margin. Raw and calibrated
-uncertainty panels similarly include all values at window means plus 25%.
-Supported cells outside these display ranges are retained but colored red;
-cells outside sampled support remain blank. The intersection of sampled
-support and this non-red PMF range is the path-valid mask used for endpoint
-relocation, the complete minimax path, and transverse integration. A
-logarithmic PMF scale is deliberately avoided because free-energy differences
-and barriers are additive quantities and a log transform would distort them.
-
-By default, plots are restricted to the union of kernel-scaled neighborhoods
-around the sampled window means, while endpoint/path operations use its
-intersection with the non-red PMF range. `support_radius=0.5` (CLI:
-`--support-radius 0.5`) gives each neighborhood a radius of half the fitted or
-fixed GP lengthscale: a circle for an isotropic kernel and an axis-aligned
-ellipse with semiaxes `support_radius * lengthscale` for an anisotropic kernel.
-This local definition does not fill a convex hull or bridge unsampled gaps. Use
-`restrict_to_sampled_support=False` (CLI:
-`--no-restrict-to-sampled-support`) for a full rectangular geometric support;
-the non-red PMF path constraint still applies.
+The default reproduces and plots the GP over the complete rectangular grid.
+Sampling-support masking is optional: pass
+`restrict_to_sampled_support=True` (CLI:
+`--restrict-to-sampled-support`) to limit the reference, plots, path search,
+and transverse integration to the convex hull of sampled window means. Use
+`support_radius` (CLI: `--support-radius`) to additionally limit that hull by
+distance in fitted GP lengthscales.
 
 Run the self-contained synthetic check (no simulation data needed):
 
@@ -357,6 +378,291 @@ The pathway contribution is split by responsibility to keep reviews local:
 The existing `find_lowest_barrier_path` entry point and default mean-only free
 search are preserved for compatibility.
 
+## OPES analysis
+
+OPES direct reweighting uses the instantaneous OPES bias plus every other
+applied restraint or wall. `opes.rct` is retained as a diagnostic and is never
+used in the weights. By default, the loader raises if the COLVAR contains an
+unlisted `*.bias` field, preventing an incomplete total bias from being used
+silently.
+
+```python
+from gpr_umbrella import analyze_opes_1d
+
+result = analyze_opes_1d(
+    "T300/COLVAR",
+    cv_field="path.s",
+    temperature=300.0,
+    energy_unit="eV",
+    bias_energy_unit="eV",  # numerical unit printed in the bias columns
+    bias_field="opes.bias",
+    other_bias_fields=(
+        "wall_path.bias",
+        "wall_hh_lo.bias",
+        "wall_hh_hi.bias",
+        "wall_relz_lo.bias",
+        "wall_relz_hi.bias",
+        "wall_corner.bias",
+        "wall_dz.bias",
+    ),
+    bins=160,
+    cumulative_cutoffs=(250_000, 500_000, 750_000, 1_000_000, 1_500_000),
+    n_blocks=5,
+    regions={"desorbed": (0.9, 2.5), "transition": (4.0, 10.0)},
+    basin_a=(10.0, 16.0),
+    basin_b=(0.9, 2.5),
+    transition_region=(4.0, 10.0),
+)
+
+profile = result["pmf"]
+print(profile["importance_weight_ess"])
+print(profile["local_ess"])
+print(profile["local_maximum_weight_fraction"])
+print(result["opes_diagnostics"])
+```
+
+The equivalent CLI writes a 1D table and a concise JSON summary when
+`--output-dir` is supplied:
+
+```bash
+gpr-biased opes T300/COLVAR --cv-field path.s --temperature 300 \
+  --energy-unit eV --bias-energy-unit eV \
+  --other-bias-field wall_path.bias \
+  --other-bias-field wall_hh_lo.bias --other-bias-field wall_hh_hi.bias \
+  --other-bias-field wall_relz_lo.bias --other-bias-field wall_relz_hi.bias \
+  --other-bias-field wall_corner.bias --other-bias-field wall_dz.bias \
+  --bins 160 --n-blocks 5 --basin-a 10 16 --basin-b 0.9 2.5 \
+  --transition-region 4 10 --output-dir analysis/T300
+```
+
+Cutoffs use the units printed in the COLVAR `time` field. The returned Kish ESS
+is an importance-weight diagnostic, not an autocorrelation-adjusted number of
+independent configurations. A high global ESS can coexist with a transition
+region dominated by one frame, so inspect local ESS and local maximum-weight
+fractions. Empty bins carry a false support flag and `NaN` leverage rather than
+looking artificially well behaved.
+
+`start_time`, `stop_time`, and `stride` (CLI: `--start-time`, `--stop-time`,
+`--stride`) apply an inclusive analysis cutoff after restart deduplication.
+The selected range and record counts are retained in `opes_data["selection"]`.
+Use several physically motivated cutoffs: dropping an early adaptive segment
+can reveal that an apparently stable cumulative PMF has no later support in a
+required basin.
+
+When both basin ranges are supplied, the analyzer also reports hysteretic
+basin-to-basin events, completed round trips, and the last qualifying time in
+each basin. With disjoint blocks it reports how many blocks support each basin
+and a basin-population free energy. Block RMS values are computed only on their
+common supported bins; a low RMS is not reassuring if later blocks have lost a
+requested basin.
+
+The CLI basin ranges act on the analyzed one-dimensional CV. For a chemical
+state definition involving several observables, construct the two Boolean
+masks explicitly and use the public detector:
+
+```python
+from gpr_umbrella import detect_hysteretic_transitions
+
+events = detect_hysteretic_transitions(
+    (HH >= 2.0) & (RELZ >= -1.7),
+    (HH <= 1.0) & (RELZ <= -3.0),
+    times=time,
+    state_names=("adsorbed", "desorbed"),
+)
+print(events["events"], events["completed_round_trips"])
+print(events["basin_evidence"]["desorbed"]["last_qualifying_time"])
+```
+
+`free_energy_from_opes_bias` converts an OPES bias grid evaluated by the
+matching PLUMED version using `F = -V/(1 - 1/gamma)`. The package reads saved
+state metadata, validates an `OPES_METAD_state` action when that metadata is
+present, but does not reimplement compressed OPES kernel semantics.
+
+## Metadynamics analysis
+
+Time-dependent MTD reweighting requires a normalized bias. Prefer an explicit
+dimensionless log-weight field or PLUMED's `*.rbias = bias - c(t)` output:
+
+```python
+from gpr_umbrella import analyze_metadynamics
+
+result = analyze_metadynamics(
+    "COLVAR",
+    cv_fields=("path.s",),
+    rbias_field="metad.rbias",
+    extra_bias_fields=("wall.bias",),
+    thermal_energy=0.025852,  # kBT in the same energy unit as the biases
+    bias_energy_factor=1.0,   # explicit input-bias to kBT-unit conversion
+    start_time=100.0,         # optional, in the COLVAR time-field unit
+    stop_time=1000.0,         # inclusive bounds after restart deduplication
+    stride=10,                # applied after the time bounds
+    bins=160,
+    n_blocks=5,
+    hills_files="HILLS",
+)
+```
+
+```bash
+gpr-biased metad COLVAR --cv-field path.s --rbias-field metad.rbias \
+  --extra-bias-field wall.bias --temperature 300 --energy-unit eV \
+  --bias-energy-factor 1.0 --start-time 100 --stop-time 1000 --stride 10 \
+  --hills HILLS --n-blocks 5 --output-dir analysis
+```
+
+Raw `metad.bias` is rejected by default because it is not interchangeable with
+the normalized bias. The raw-bias route requires both the explicit
+`allow_quasistatic_bias=True` opt-in and a finite, nonzero `start_time` to
+`stop_time` range:
+
+```python
+raw_segment = analyze_metadynamics(
+    "COLVAR",
+    cv_fields=("path.s",),
+    raw_bias_field="metad.bias",
+    extra_bias_fields=("wall.bias",),
+    allow_quasistatic_bias=True,
+    start_time=800.0,
+    stop_time=1000.0,
+    thermal_energy=0.025852,
+)
+```
+
+```bash
+gpr-biased metad COLVAR --cv-field path.s --raw-bias-field metad.bias \
+  --extra-bias-field wall.bias --allow-quasistatic-bias \
+  --start-time 800 --stop-time 1000 --temperature 300 --energy-unit eV
+```
+
+Time bounds use the units of the named COLVAR time field and are inclusive.
+Restart overlap is deduplicated first, the time bounds are applied second, and
+the stride is applied last. At least two records must remain. The returned
+`selection` metadata records the requested and realized range and all record
+counts. Explicit-logweight and normalized-`rbias` routes support the same
+optional selection controls. Bounding a raw-bias segment records the scope of
+the quasi-static assumption; it does not demonstrate stationarity.
+
+Restart-overlap records are deduplicated by named time. As for OPES, every
+printed wall/restraint `*.bias` must be accounted for. With `action.rbias`, the
+matching `action.bias` is recognized as the raw bias that was replaced and is
+not added twice. A precomputed log weight cannot be audited from its values, so
+printed bias columns require an explicit `allow_unlisted_bias_fields=True`
+acknowledgement after confirming they were included when that log weight was
+created.
+
+`load_hills_diagnostics` summarizes deposition intervals and hill-height
+evolution. `run_sum_hills` invokes PLUMED with an argument list (never a shell)
+for conventional HILLS reconstruction, avoiding a partial Python
+reimplementation of well-tempered, flexible-hill, or multiple-walker rules.
+`analyze_metadynamics` applies the same explicit `bias_energy_factor` to HILLS
+heights and COLVAR bias energies so their numerical units remain consistent.
+COLVAR time selection does not crop a separately supplied HILLS file; HILLS
+diagnostics continue to summarize every record in that file.
+
+## ICF/GPR for OPES or metadynamics
+
+The paper-style route is bias-agnostic once valid instantaneous collective
+forces are available. With the paper's convention, `ICF` is a thermodynamic
+force and the package always applies
+
+> L. Mones, N. Bernstein, and G. Csányi, "Exploration, Sampling, And
+> Reconstruction of Free Energy Surfaces with Gaussian Process Regression,"
+> *J. Chem. Theory Comput.* **2016**, *12* (10), 5100–5110.
+> [doi:10.1021/acs.jctc.6b00553](https://doi.org/10.1021/acs.jctc.6b00553)
+> ([local PDF](../ct6b00553.pdf))
+
+```text
+grad A(xi) = - conditional_mean(ICF | xi)
+```
+
+```python
+from gpr_umbrella import reconstruct_pmf_icf
+
+result = reconstruct_pmf_icf(
+    "COLVAR_ICF",
+    cv_fields=("path.s",),
+    icf_fields=("path_s.icf",),
+    cv_factors=1.0,       # input-to-output coordinate conversion
+    energy_factor=1.0,   # input-to-output energy conversion
+    aggregation_bins=80,
+    time_block_size=20_000,
+    bias_depends_only_on_modeled_cvs=True,
+    quasi_equilibrium=True,
+    physical_force_excludes_bias=True,
+    metric_correction_included=True,
+    grid_n=300,
+)
+```
+
+```bash
+gpr-biased icf COLVAR_ICF --cv-field path.s --icf-field path_s.icf \
+  --aggregation-bins 80 --time-block-size 20000 \
+  --bias-depends-only-on-modeled-cvs --quasi-equilibrium \
+  --physical-force-excludes-bias --metric-correction-included \
+  --require-paper-assumptions --output-dir analysis
+```
+
+The ICF must be computed from the unbiased physical potential, with all bias
+forces removed, and must include the CV metric/Jacobian divergence term when
+required. `COLVAR`, HILLS, an OPES state, and bias values alone do not provide
+this observable. For an adaptive bias, Equation 8 also requires all applied
+biases to depend only on the complete reconstructed CV vector and requires
+equilibrium or justified quasi-equilibrium conditional sampling. A wall on an
+omitted CV breaks that invariance.
+
+All four paper-validity conditions are required by default. The Python API's
+`require_paper_assumptions=False` and CLI's
+`--allow-unverified-paper-assumptions` are deliberately named unsafe opt-outs;
+the returned validity record remains explicit. Pointwise LOO calibration is
+also prevented from shrinking raw GP uncertainty by default because coherent
+time-correlated force errors can look artificially predictable. Only enable
+`allow_uncertainty_downscaling` when validation groups are demonstrably
+independent.
+
+Coordinate and ICF conversions are coupled: when `cv_factors` converts input
+CV coordinates, the derived thermodynamic-force factor is
+`energy_factor / cv_factor`. An explicit `icf_factors` override is available
+for already converted force columns and is recorded in the result.
+
+Exact derivative GPR scales cubically and is guarded at 1,000 scalar gradient
+components (`N_points * N_CVs`) by default. Larger trajectories must use
+explicit local/time-block aggregation or a future sparse-GP implementation.
+Aggregation reduces size, but its covariance is only decorrelation-aware when
+blocks are longer than the relevant correlation time.
+
+### Generic derivative-observation GP
+
+The sampler-independent core is also public. `fit_gradient_gp(points,
+gradients, gradient_noise_cov)` expects `points` and `gradients` with shape
+`(N, D)` and a full `(N*D, N*D)` observation covariance in point-major order.
+`fit_icf_gp` accepts the same covariance but requires an explicit
+`force_convention`: use `"thermodynamic_force"` for the paper convention
+`ICF = -grad A`, or `"free_energy_gradient"` when the supplied values already
+are `grad A`. `predict_gradient_gp` and
+`posterior_covariance_gradient_gp` then return scalar-free-energy predictions
+and covariance, optionally relative to an explicit reference point.
+
+The shared GP currently uses a nonperiodic squared-exponential kernel. Unwrap
+or otherwise transform torsional CVs; a periodic derivative kernel is not yet
+implemented.
+
+## Reading convergence evidence
+
+The adaptive-bias APIs intentionally do not return a universal `converged`
+Boolean. Judge each reported observable using several independent checks:
+
+- cumulative and disjoint-block PMF, barrier, and basin-population stability;
+- global and local importance ESS plus maximum single-frame leverage;
+- repeated transitions and completed round trips between the relevant basins;
+- OPES `rct`, `zed`, `neff`, and kernel-count evolution, or MTD hill evolution;
+- agreement between reweighted density, saved-bias/HILLS, and ICF estimators;
+- sensitivity to equilibration cutoff, binning, and basin definitions;
+- agreement between independent replicas or walkers;
+- stability of hidden/orthogonal observables at fixed modeled CV.
+
+Agreement of two estimators built from one trajectory is internal consistency.
+It cannot replace basin recurrence, independent runs, or evidence that slow
+orthogonal coordinates equilibrated.
+
 ## Citation
 
 This implementation is based on the method introduced in:
@@ -366,8 +672,9 @@ This implementation is based on the method introduced in:
 If you use this tool in published work, please cite the paper above and acknowledge
 this implementation.
 
-A closely related follow-up paper extends the same GPR-based reconstruction to combined
-exploration + sampling (metadynamics biasing with an instantaneous-collective-force
-gradient estimator, reconstructed with GPR):
+The adaptive-bias ICF/GPR route follows:
 
 > L. Mones, N. Bernstein, and G. Csányi, "Exploration, Sampling, And Reconstruction of Free Energy Surfaces with Gaussian Process Regression," *J. Chem. Theory Comput.* **2016**, *12* (10), 5100–5110. [doi:10.1021/acs.jctc.6b00553](https://doi.org/10.1021/acs.jctc.6b00553)
+
+The supplied manuscript is available locally as
+[ct6b00553.pdf](../ct6b00553.pdf).
