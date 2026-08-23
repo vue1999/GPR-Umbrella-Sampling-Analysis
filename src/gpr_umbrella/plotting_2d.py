@@ -174,20 +174,6 @@ def plot_pmf_2d(results: dict, output_path: str | None = None,
     return fig
 
 
-def _chaikin(pts, iters=2):
-    """Chaikin corner-cutting for display only: round a polyline into a smooth
-    curve with fixed endpoints (turns the 8-connected staircase into a line)."""
-    pts = np.asarray(pts, dtype=float)
-    for _ in range(iters):
-        out = [pts[0]]
-        for a, b in zip(pts[:-1], pts[1:]):
-            out.append(0.75 * a + 0.25 * b)
-            out.append(0.25 * a + 0.75 * b)
-        out.append(pts[-1])
-        pts = np.array(out)
-    return pts
-
-
 def _window_scatter(ax, means, centers=None, cmap="viridis", *,
                     mean_color=None, mean_size=18, show_targets=True):
     """Overlay GP observation locations and optional restraint targets.
@@ -487,8 +473,7 @@ def plot_lowest_barrier_path(results: dict, path_result: dict,
         cf, ax=ax,
         label=f"PMF − sampled-window minimum ({eu}); red = outside display range",
     )
-    smooth = _chaikin(np.column_stack([path_result["x"], path_result["y"]]), iters=2)
-    ax.plot(smooth[:, 0], smooth[:, 1], color="black", linestyle="--",
+    ax.plot(path_result["x"], path_result["y"], color="black", linestyle="--",
             linewidth=1.4, dash_capstyle="round", zorder=5, label="lowest-barrier path")
     if path_result.get("endpoints_adjusted", False):
         nominal = np.asarray([

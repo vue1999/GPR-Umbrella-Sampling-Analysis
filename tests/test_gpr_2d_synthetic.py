@@ -236,3 +236,14 @@ def test_2d_plots_mark_gp_observations_at_sampled_means():
         _scatter_offsets(path_ax, "sampled means (GP observations)"),
         res["means"],
     )
+    path_lines = [
+        line for line in path_ax.lines
+        if line.get_label() == "lowest-barrier path"
+    ]
+    assert len(path_lines) == 1
+    np.testing.assert_allclose(
+        path_lines[0].get_xdata(), res["lowest_barrier_path"]["x"]
+    )
+    np.testing.assert_allclose(
+        path_lines[0].get_ydata(), res["lowest_barrier_path"]["y"]
+    )
