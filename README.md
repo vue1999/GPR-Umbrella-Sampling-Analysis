@@ -169,8 +169,8 @@ and the LOO calibration histogram). Pass `plot_diagnostics=False`
 
 By default, the PMF reference, plots, path search, and transverse integration
 are restricted to the union of kernel-scaled neighborhoods around the sampled
-window means. `support_radius=1.0` (CLI: `--support-radius 1.0`) gives each
-neighborhood a radius of one fitted or fixed GP lengthscale: a circle for an
+window means. `support_radius=0.5` (CLI: `--support-radius 0.5`) gives each
+neighborhood a radius of half the fitted or fixed GP lengthscale: a circle for
 isotropic kernel and an axis-aligned ellipse with semiaxes
 `support_radius * lengthscale` for an anisotropic kernel. This local definition
 does not fill a convex hull or bridge unsampled gaps. Use

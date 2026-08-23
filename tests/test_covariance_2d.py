@@ -227,9 +227,11 @@ def test_rank_deficient_window_geometry_is_supported_locally() -> None:
 
     np.testing.assert_array_equal(mask, [True, False])
 
+
 def test_reconstruction_uses_sampled_neighborhoods_by_default() -> None:
     results = _reconstruct_small(
         _small_correlated_data(),
+        grid_n=(10, 9),
         optimize_hyperparams=False,
         fixed_lengthscale=(0.8, 1.1),
         fixed_sigma_f=1.2,
@@ -237,8 +239,8 @@ def test_reconstruction_uses_sampled_neighborhoods_by_default() -> None:
 
     assert results["restrict_to_sampled_support"] is True
     assert results["support_kind"] == "union_of_kernel_ellipses"
-    assert results["support_radius"] == pytest.approx(1.0)
-    np.testing.assert_allclose(results["support_ellipse_semiaxes"], (0.8, 1.1))
+    assert results["support_radius"] == pytest.approx(0.5)
+    np.testing.assert_allclose(results["support_ellipse_semiaxes"], (0.4, 0.55))
     assert np.any(results["support_mask"])
     assert np.any(~results["support_mask"])
     reference = results["_gp_state"]["pmf_reference_index"]

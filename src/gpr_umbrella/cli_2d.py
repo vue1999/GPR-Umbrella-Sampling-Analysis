@@ -43,9 +43,9 @@ def build_parser() -> argparse.ArgumentParser:
              "neighborhoods around sampled window means (default: enabled)",
     )
     p.add_argument(
-        "--support-radius", type=float, default=1.0,
+        "--support-radius", type=float, default=0.5,
         help="Radius of each sampled neighborhood in GP lengthscales "
-             "(default: 1.0)",
+             "(default: 0.5)",
     )
     p.add_argument("--output-dir", default=None)
     p.add_argument("--output-prefix", default=None)

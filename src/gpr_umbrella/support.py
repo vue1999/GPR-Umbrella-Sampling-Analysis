@@ -9,7 +9,7 @@ def sampled_support_mask(
     points: np.ndarray,
     window_means: np.ndarray,
     lengthscale: float | np.ndarray,
-    radius: float = 1.0,
+    radius: float = 0.5,
 ) -> np.ndarray:
     """Return the union of kernel-scaled balls around sampled window means.
 
@@ -19,8 +19,9 @@ def sampled_support_mask(
     kernel and axis-aligned ellipses for an anisotropic kernel, with semiaxes
     ``radius * lengthscale``.
 
-    The definition is local: it neither fills a convex hull nor bridges gaps
-    between disconnected groups of windows.
+    The default radius is half a GP lengthscale. The definition is local: it
+    neither fills a convex hull nor bridges gaps between disconnected groups
+    of windows.
     """
     points = np.asarray(points, dtype=float)
     window_means = np.asarray(window_means, dtype=float)

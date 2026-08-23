@@ -99,7 +99,7 @@ def test_2d_path_options_are_exposed_and_find_mep_is_retired() -> None:
     assert parsed.path_aligned_marginal is True
     assert parsed.thermal_energy == pytest.approx(0.025)
     assert parsed.restrict_to_sampled_support is True
-    assert parsed.support_radius == pytest.approx(1.0)
+    assert parsed.support_radius == pytest.approx(0.5)
     assert parsed.adjust_path_endpoints is True
 
     restricted = parser.parse_args([

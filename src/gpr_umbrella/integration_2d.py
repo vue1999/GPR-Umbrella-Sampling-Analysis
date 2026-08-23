@@ -528,7 +528,7 @@ def reconstruct_pmf_2d(
     covariance_batch_factor: float = 5.0,
     calibrate_uncertainty: bool = True,
     restrict_to_sampled_support: bool = True,
-    support_radius: float = 1.0,
+    support_radius: float = 0.5,
     output_dir: str | None = None,
     output_prefix: str | None = None,
     plot: bool = True,

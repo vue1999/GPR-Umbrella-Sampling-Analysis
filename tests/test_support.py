@@ -27,10 +27,19 @@ def test_support_allows_rank_deficient_window_layouts():
     means = np.array([[-1.0, -2.0], [0.0, 0.0], [1.0, 2.0]])
     points = np.array([[0.0, 0.0], [0.4, 0.0], [2.0, 0.0]])
 
-    mask = sampled_support_mask(points, means, lengthscale=0.5)
+    mask = sampled_support_mask(points, means, lengthscale=0.5, radius=1.0)
 
     np.testing.assert_array_equal(mask, [True, True, False])
 
+
+
+def test_default_radius_is_half_a_lengthscale():
+    means = np.array([[0.0, 0.0]])
+    points = np.array([[0.9, 0.0], [1.1, 0.0], [0.0, 1.9], [0.0, 2.1]])
+
+    mask = sampled_support_mask(points, means, lengthscale=(2.0, 4.0))
+
+    np.testing.assert_array_equal(mask, [True, False, True, False])
 
 @pytest.mark.parametrize("radius", [None, 0.0, -1.0, np.nan, True])
 def test_support_radius_must_be_a_finite_positive_number(radius):

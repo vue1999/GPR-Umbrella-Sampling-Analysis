@@ -98,6 +98,7 @@ def test_lowest_barrier_path_recovers_saddle(tmp_path):
     data = build_synthetic_data()
     res = reconstruct_pmf_2d(
         data=data, output_dir=str(tmp_path), output_prefix="path",
+        support_radius=1.0,
         plot=True, plot_diagnostics=False, find_lowest_barrier=True,
         path_aligned_marginal=True, thermal_energy=0.15,
         perpendicular_points=31,
