@@ -74,6 +74,7 @@ def _analytic_results():
         "gy": gy,
         "pmf": pmf,
         "support_mask": np.ones_like(pmf, dtype=bool),
+        "support_radius": 0.01,
         "latent_variance_raw": _latent_variance_on_grid(state, gx, gy),
         "lengthscale": state["lengthscale"].copy(),
         "loo_calibration_factor": 1.7,
@@ -156,6 +157,7 @@ def test_barrier_error_uses_gp_covariance_with_the_start():
         "gy": gy,
         "pmf": np.array([[0.0], [1.0], [0.2]]),
         "support_mask": np.ones((3, 1), dtype=bool),
+        "support_radius": 0.01,
         "latent_variance_raw": np.diag(covariance)[:, None],
         "lengthscale": np.array([5.0, 5.0]),
         "loo_calibration_factor": 2.0,
@@ -363,3 +365,52 @@ def test_path_savers_keep_each_cv_unit_in_mixed_unit_headers(
         assert "distance(nm)" in header
         assert "angle(rad)" in header
         assert "kJ/mol" in header
+
+
+def test_requested_endpoints_move_to_deepest_supported_local_minima():
+    results = _analytic_results()
+    results["lengthscale"] = np.ones(2)
+    results["support_radius"] = 0.5
+    middle = int(np.argmin(np.abs(results["gy"])))
+    results["pmf"] = np.full_like(results["pmf"], 10.0)
+    results["pmf"][:, middle] = 2.0
+    start_index = int(np.argmin(np.abs(results["gx"] + 0.6)))
+    end_index = int(np.argmin(np.abs(results["gx"] - 0.6)))
+    results["pmf"][start_index, middle] = -2.0
+    results["pmf"][end_index, middle] = -1.0
+
+    path = find_lowest_barrier_path(
+        results,
+        endpoints=((-1.0, 0.0), (1.0, 0.0)),
+    )
+
+    assert path["nominal_start_xy"] == (-1.0, 0.0)
+    assert path["nominal_end_xy"] == (1.0, 0.0)
+    assert path["start_xy"] == pytest.approx((-0.6, 0.0))
+    assert path["end_xy"] == pytest.approx((0.6, 0.0))
+    assert path["start_endpoint"]["selection"] == "grid_local_minimum"
+    assert path["end_endpoint"]["selection"] == "grid_local_minimum"
+    assert path["endpoints_adjusted"] is True
+    assert path["endpoint_search_radius"] == pytest.approx(0.5)
+    path_indices = [
+        (int(np.argmin(np.abs(results["gx"] - x))),
+         int(np.argmin(np.abs(results["gy"] - y))))
+        for x, y in zip(path["x"], path["y"])
+    ]
+    assert all(results["support_mask"][index] for index in path_indices)
+
+
+def test_disconnected_endpoint_neighborhoods_fail_with_actionable_error():
+    results = _analytic_results()
+    results["lengthscale"] = np.ones(2)
+    support = np.zeros_like(results["pmf"], dtype=bool)
+    support[:4, :] = True
+    support[7:, :] = True
+    results["support_mask"] = support
+
+    with pytest.raises(ValueError, match="same connected sampled-support"):
+        find_lowest_barrier_path(
+            results,
+            endpoints=((-1.0, 0.0), (1.0, 0.0)),
+            endpoint_search_radius=0.25,
+        )

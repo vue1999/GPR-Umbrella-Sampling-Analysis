@@ -35,7 +35,6 @@ import glob
 import numpy as np
 from scipy.optimize import minimize
 from scipy.linalg import cho_factor, cho_solve
-from scipy.spatial import Delaunay, QhullError, cKDTree
 
 from .integration_1d import (
     _extract_window_index,
@@ -43,6 +42,7 @@ from .integration_1d import (
     compute_tau_int,
 )
 
+from .support import sampled_support_mask
 
 # ---------------------------------------------------------------------------
 # Data loading (2D PLUMED COLVAR + per-window centre/kappa files)
@@ -255,37 +255,10 @@ def _grid_support_mask(
     points: np.ndarray,
     training_points: np.ndarray,
     lengthscale: np.ndarray,
-    radius: float | None,
+    radius: float,
 ) -> np.ndarray:
-    """Mark grid points supported by the sampled window geometry.
-
-    Support is restricted to the convex hull of sampled window means.  When
-    ``radius`` is not ``None``, a point must additionally be within that many
-    ARD lengthscales of a training point; this can reveal large holes inside
-    the hull.
-    """
-    scaled_training = training_points / lengthscale
-    scaled_points = points / lengthscale
-    dimensions = scaled_training.shape[1]
-    affine_rank = np.linalg.matrix_rank(
-        scaled_training - scaled_training.mean(axis=0)
-    )
-    if len(scaled_training) < dimensions + 1 or affine_rank < dimensions:
-        raise ValueError(
-            "The sampled window means do not span a two-dimensional region"
-        )
-    try:
-        inside_hull = Delaunay(scaled_training).find_simplex(scaled_points) >= 0
-    except QhullError as exc:
-        raise ValueError(
-            "Could not construct a two-dimensional sampling-support hull"
-        ) from exc
-    if radius is None:
-        return inside_hull
-    if not np.isfinite(radius) or radius <= 0:
-        raise ValueError("support_radius must be positive or None")
-    nearest, _ = cKDTree(scaled_training).query(scaled_points, k=1)
-    return inside_hull & (nearest <= radius)
+    """Mark the union of kernel-scaled neighborhoods of sampled means."""
+    return sampled_support_mask(points, training_points, lengthscale, radius)
 
 
 # ---------------------------------------------------------------------------
@@ -554,8 +527,8 @@ def reconstruct_pmf_2d(
     include_cross_component_covariance: bool = True,
     covariance_batch_factor: float = 5.0,
     calibrate_uncertainty: bool = True,
-    restrict_to_sampled_support: bool = False,
-    support_radius: float | None = 1.5,
+    restrict_to_sampled_support: bool = True,
+    support_radius: float = 1.0,
     output_dir: str | None = None,
     output_prefix: str | None = None,
     plot: bool = True,
@@ -563,6 +536,8 @@ def reconstruct_pmf_2d(
     find_lowest_barrier: bool = False,
     path_endpoints=None,
     path_metric_scale: tuple[float, float] | None = None,
+    path_endpoint_radius: float | None = None,
+    adjust_path_endpoints: bool = True,
     path_aligned_marginal: bool = False,
     thermal_energy: float | None = None,
     perpendicular_points: int = 201,
@@ -580,12 +555,13 @@ def reconstruct_pmf_2d(
     gradients are interpreted in ``energy_unit / cv_units[d]²`` and
     ``energy_unit / cv_units[d]``, respectively.
 
-    By default the PMF is reconstructed over the full rectangular grid, as in
-    the original implementation.  Set ``restrict_to_sampled_support=True`` to
-    restrict the reference, plots, path search, and transverse integration to
-    the convex hull of sampled window means.  A finite ``support_radius`` then
-    additionally removes points farther than that many ARD lengthscales from
-    every sampled mean; ``None`` selects the complete convex hull.
+    By default the reference, plots, path search, and transverse integration
+    are restricted to the union of kernel-scaled neighborhoods around sampled
+    window means. ``support_radius`` is the radius in GP lengthscales, giving
+    ellipse semiaxes ``support_radius * lengthscale``. Set
+    ``restrict_to_sampled_support=False`` to recover the unrestricted grid.
+    Explicit path endpoints are moved to nearby supported minima by default;
+    ``path_endpoint_radius`` controls that search in GP-lengthscale units.
     """
     if (colvar_dir is None) == (data is None):
         raise ValueError("Provide exactly one of colvar_dir or data.")
@@ -720,18 +696,41 @@ def reconstruct_pmf_2d(
     L, low = cho_factor(Ky, lower=True)
     alpha = cho_solve((L, low), y)
 
-    # Prediction grid
-    gx = np.linspace(centers[:, 0].min(), centers[:, 0].max(), grid_n[0])
-    gy = np.linspace(centers[:, 1].min(), centers[:, 1].max(), grid_n[1])
+    # Prediction grid. A restricted grid includes complete boundary ellipses
+    # instead of clipping them at the extrema of the sampled window means.
+    if restrict_to_sampled_support:
+        if isinstance(support_radius, (bool, np.bool_)):
+            raise ValueError("support_radius must be finite and positive")
+        try:
+            support_radius = float(support_radius)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                "support_radius must be finite and positive"
+            ) from exc
+        if not np.isfinite(support_radius) or support_radius <= 0:
+            raise ValueError(
+                "support_radius must be finite and positive when support "
+                "restriction is enabled"
+            )
+        lower = X.min(axis=0) - support_radius * ell
+        upper = X.max(axis=0) + support_radius * ell
+    else:
+        lower = centers.min(axis=0)
+        upper = centers.max(axis=0)
+    gx = np.linspace(lower[0], upper[0], grid_n[0])
+    gy = np.linspace(lower[1], upper[1], grid_n[1])
     GX, GY = np.meshgrid(gx, gy, indexing="ij")
-    Xs = np.column_stack([GX.ravel(), GY.ravel()])         # (M, 2)
+    Xs = np.column_stack([GX.ravel(), GY.ravel()])
     if restrict_to_sampled_support:
         support_mask = _grid_support_mask(Xs, X, ell, support_radius)
     else:
         support_mask = np.ones(len(Xs), dtype=bool)
     supported_indices = np.flatnonzero(support_mask)
     if len(supported_indices) == 0:
-        raise ValueError("No prediction-grid points lie in the sampled support region")
+        raise ValueError(
+            "No prediction-grid points lie in the sampled-support region; "
+            "increase grid_n or support_radius"
+        )
 
     # Predict in chunks.  Peak working storage is O(batch_size * N * D), not
     # O(grid_size^2) or even O(grid_size * N * D).
@@ -749,10 +748,8 @@ def reconstruct_pmf_2d(
             np.inf,
         )
 
-    # PMF is defined up to a constant.  With the default full-grid behavior,
-    # this is the global predicted minimum, matching the original code.  When
-    # support restriction is explicitly enabled, only supported cells can set
-    # the reference.
+    # PMF is defined up to a constant. The reference is the lowest supported
+    # prediction; opting out of support restriction makes every grid cell valid.
     ref = int(supported_indices[np.argmin(f_mean[supported_indices])])
     pmf = f_mean - f_mean[ref]
     K_ref = _k_f_grad(Xs[[ref]], X, sigma_f, ell)
@@ -778,8 +775,13 @@ def reconstruct_pmf_2d(
         print(f"LOO z-score std (calibration): "
               f"{cal_factor:.3f}{'' if calibrate_uncertainty else ' (reported, not default)'}")
         displayed_std = pmf_std_calibrated if calibrate_uncertainty else pmf_std_raw
-        print(f"PMF range: {pmf.min():.3f}..{pmf.max():.3f} {energy_unit}  "
-              f"max sigma: {displayed_std.max():.3f}")
+        supported_pmf = pmf[support_mask]
+        supported_std = displayed_std[support_mask]
+        print(
+            f"Supported PMF range: {supported_pmf.min():.3f}.."
+            f"{supported_pmf.max():.3f} {energy_unit}  "
+            f"max sigma: {supported_std.max():.3f}"
+        )
 
     results = {
         "centers": centers, "kappa": kappa, "means": means,
@@ -796,6 +798,16 @@ def reconstruct_pmf_2d(
         "pmf_std_calibrated": pmf_std_calibrated.reshape(grid_n),
         "support_mask": support_mask.reshape(grid_n),
         "restrict_to_sampled_support": bool(restrict_to_sampled_support),
+        "support_kind": (
+            "union_of_kernel_ellipses"
+            if restrict_to_sampled_support else "full_rectangle"
+        ),
+        "support_radius": (
+            float(support_radius) if restrict_to_sampled_support else None
+        ),
+        "support_ellipse_semiaxes": (
+            float(support_radius) * ell if restrict_to_sampled_support else None
+        ),
         "loo_z": loo_z, "loo_calibration_factor": cal_factor,
         "default_uncertainty": "calibrated" if calibrate_uncertainty else "raw",
         "cv_names": cv_names, "cv_units": cv_units, "energy_unit": energy_unit,
@@ -854,6 +866,8 @@ def reconstruct_pmf_2d(
             results,
             endpoints=path_endpoints,
             metric_scale=path_metric_scale,
+            endpoint_search_radius=path_endpoint_radius,
+            adjust_endpoints=adjust_path_endpoints,
             path_aligned_marginal=path_aligned_marginal,
             thermal_energy=thermal_energy,
             perpendicular_points=perpendicular_points,

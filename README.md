@@ -167,13 +167,15 @@ autocorrelation time; window-overlap ellipses, per-observation LOO z-scores,
 and the LOO calibration histogram). Pass `plot_diagnostics=False`
 (CLI: `--no-diagnostics`) to skip it.
 
-The default reproduces and plots the GP over the complete rectangular grid.
-Sampling-support masking is optional: pass
-`restrict_to_sampled_support=True` (CLI:
-`--restrict-to-sampled-support`) to limit the reference, plots, path search,
-and transverse integration to the convex hull of sampled window means. Use
-`support_radius` (CLI: `--support-radius`) to additionally limit that hull by
-distance in fitted GP lengthscales.
+By default, the PMF reference, plots, path search, and transverse integration
+are restricted to the union of kernel-scaled neighborhoods around the sampled
+window means. `support_radius=1.0` (CLI: `--support-radius 1.0`) gives each
+neighborhood a radius of one fitted or fixed GP lengthscale: a circle for an
+isotropic kernel and an axis-aligned ellipse with semiaxes
+`support_radius * lengthscale` for an anisotropic kernel. This local definition
+does not fill a convex hull or bridge unsampled gaps. Use
+`restrict_to_sampled_support=False` (CLI:
+`--no-restrict-to-sampled-support`) for the full rectangular grid.
 
 Run the self-contained synthetic check (no simulation data needed):
 
@@ -195,6 +197,16 @@ path = find_lowest_barrier_path(
     endpoints=((x_start, y_start), (x_end, y_end)),
 )
 ```
+
+Requested endpoints are relocated to the deepest grid-local minima within an
+elliptical neighborhood by default. The endpoint search uses the same
+lengthscale metric as sampled support and defaults to `support_radius`; set
+`endpoint_search_radius` (CLI: `--path-endpoint-radius`) independently when
+needed, or disable relocation with `adjust_endpoints=False` (CLI:
+`--no-adjust-path-endpoints`). Both relocated endpoints must belong to the same
+connected sampled-support component. The complete minimum-bottleneck path may
+move anywhere in that component; disconnected endpoint neighborhoods produce
+an actionable error instead of silently crossing an unsampled gap.
 
 The 2D CLI can find that path and optionally compute the path-aligned marginal
 PMF, `A(s)`, by Boltzmann-integrating the transverse coordinate `u` at each

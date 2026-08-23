@@ -209,46 +209,57 @@ def test_zero_variance_cv_does_not_inherit_other_components_covariance_floor() -
     assert rescaled_covariance[0, 1] == rescaled_covariance[1, 0] == 0.0
 
 
-def test_rank_deficient_window_geometry_is_not_marked_as_2d_support() -> None:
+def test_rank_deficient_window_geometry_is_supported_locally() -> None:
     training = np.array([
         [-1.0, -2.0],
         [0.0, 0.0],
         [1.0, 2.0],
         [2.0, 4.0],
     ])
-    query = np.array([[0.0, 0.0], [0.5, 0.5]])
+    query = np.array([[0.5, 0.5], [0.0, 1.1]])
 
-    with pytest.raises(ValueError, match="do not span a two-dimensional"):
-        _grid_support_mask(
-            query,
-            training,
-            lengthscale=np.array([1.0, 1.0]),
-            radius=None,
-        )
+    mask = _grid_support_mask(
+        query,
+        training,
+        lengthscale=np.array([1.0, 1.0]),
+        radius=1.0,
+    )
 
+    np.testing.assert_array_equal(mask, [True, False])
 
-def test_reconstruction_uses_full_rectangular_grid_by_default() -> None:
+def test_reconstruction_uses_sampled_neighborhoods_by_default() -> None:
     results = _reconstruct_small(
         _small_correlated_data(),
         optimize_hyperparams=False,
         fixed_lengthscale=(0.8, 1.1),
         fixed_sigma_f=1.2,
-        # The radius only takes effect when sampled-support restriction is
-        # explicitly enabled.
-        support_radius=0.01,
+    )
+
+    assert results["restrict_to_sampled_support"] is True
+    assert results["support_kind"] == "union_of_kernel_ellipses"
+    assert results["support_radius"] == pytest.approx(1.0)
+    np.testing.assert_allclose(results["support_ellipse_semiaxes"], (0.8, 1.1))
+    assert np.any(results["support_mask"])
+    assert np.any(~results["support_mask"])
+    reference = results["_gp_state"]["pmf_reference_index"]
+    assert results["support_mask"].ravel()[reference]
+    assert results["pmf"].ravel()[reference] == pytest.approx(0.0, abs=1e-14)
+
+
+def test_reconstruction_can_explicitly_use_the_full_rectangle() -> None:
+    results = _reconstruct_small(
+        _small_correlated_data(),
+        optimize_hyperparams=False,
+        fixed_lengthscale=(0.8, 1.1),
+        fixed_sigma_f=1.2,
+        restrict_to_sampled_support=False,
+        support_radius=None,
     )
 
     assert np.all(results["support_mask"])
     assert results["restrict_to_sampled_support"] is False
-
-    state = results["_gp_state"]
-    query = np.column_stack([results["GX"].ravel(), results["GY"].ravel()])
-    posterior_mean = _k_f_grad(
-        query, state["X"], state["sigma_f"], state["lengthscale"]
-    ) @ state["alpha"]
-    assert state["pmf_reference_index"] == int(np.argmin(posterior_mean))
-    assert results["pmf"].min() == pytest.approx(0.0, abs=1e-14)
-
+    assert results["support_kind"] == "full_rectangle"
+    assert results["support_radius"] is None
 
 def test_nll_uses_the_complete_observation_covariance() -> None:
     X = np.array([[-0.7, 0.1], [0.2, -0.4], [0.9, 0.8]])
@@ -353,7 +364,7 @@ def test_posterior_covariance_and_reference_state_drive_pmf_uncertainty() -> Non
         fixed_sigma_f=1.2,
         covariance_batch_factor=1.0,
         restrict_to_sampled_support=True,
-        support_radius=None,
+        support_radius=1.0,
         plot=False,
         plot_diagnostics=False,
         save_outputs=False,
@@ -453,7 +464,7 @@ def test_pmf_reference_is_lowest_point_within_support(monkeypatch) -> None:
         fixed_sigma_f=1.2,
         covariance_batch_factor=1.0,
         restrict_to_sampled_support=True,
-        support_radius=None,
+        support_radius=1.0,
         plot=False,
         plot_diagnostics=False,
         save_outputs=False,
@@ -481,14 +492,14 @@ def test_optimized_reconstruction_is_invariant_to_energy_unit_rescaling() -> Non
         _small_correlated_data(),
         energy_unit="eV",
         optimize_hyperparams=True,
-        restrict_to_sampled_support=True,
+        restrict_to_sampled_support=False,
         support_radius=None,
     )
     rescaled = _reconstruct_small(
         _rescale_energy(_small_correlated_data(), factor),
         energy_unit="kJ/mol",
         optimize_hyperparams=True,
-        restrict_to_sampled_support=True,
+        restrict_to_sampled_support=False,
         support_radius=None,
     )
 
@@ -555,13 +566,13 @@ def test_optimized_reconstruction_is_invariant_to_independent_cv_units() -> None
     base = _reconstruct_small(
         _small_correlated_data(),
         optimize_hyperparams=True,
-        restrict_to_sampled_support=True,
+        restrict_to_sampled_support=False,
         support_radius=None,
     )
     rescaled = _reconstruct_small(
         _rescale_coordinates(_small_correlated_data(), coordinate_factors),
         optimize_hyperparams=True,
-        restrict_to_sampled_support=True,
+        restrict_to_sampled_support=False,
         support_radius=None,
     )
 
@@ -626,7 +637,7 @@ def test_data_input_honors_kj_kappa_conversion_without_mutating_caller() -> None
         optimize_hyperparams=False,
         fixed_lengthscale=(0.8, 1.1),
         fixed_sigma_f=1.2,
-        support_radius=None,
+        support_radius=1.0,
     )
     expected = _reconstruct_small(
         explicitly_converted,
@@ -635,7 +646,7 @@ def test_data_input_honors_kj_kappa_conversion_without_mutating_caller() -> None
         optimize_hyperparams=False,
         fixed_lengthscale=(0.8, 1.1),
         fixed_sigma_f=1.2,
-        support_radius=None,
+        support_radius=1.0,
     )
 
     np.testing.assert_array_equal(raw_data["kappa"], original_kappa)
@@ -665,13 +676,13 @@ def test_zero_signal_data_requires_an_explicit_signal_scale() -> None:
     }
 
     with pytest.raises(ValueError, match="signal scale is unidentifiable"):
-        _reconstruct_small(data, optimize_hyperparams=True, support_radius=None)
+        _reconstruct_small(data, optimize_hyperparams=True, support_radius=1.0)
 
     result = _reconstruct_small(
         data,
         optimize_hyperparams=True,
         fixed_sigma_f=1.0,
-        support_radius=None,
+        support_radius=1.0,
     )
     np.testing.assert_allclose(result["pmf"], 0.0, atol=0.0)
     assert np.all(np.isfinite(result["pmf_std_raw"]))

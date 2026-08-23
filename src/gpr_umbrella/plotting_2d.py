@@ -324,6 +324,22 @@ def plot_lowest_barrier_path(results: dict, path_result: dict,
     smooth = _chaikin(np.column_stack([path_result["x"], path_result["y"]]), iters=2)
     ax.plot(smooth[:, 0], smooth[:, 1], color="black", linestyle="--",
             linewidth=1.4, dash_capstyle="round", zorder=5, label="lowest-barrier path")
+    if path_result.get("endpoints_adjusted", False):
+        nominal = np.asarray([
+            path_result["nominal_start_xy"], path_result["nominal_end_xy"]
+        ])
+        selected = np.asarray([
+            path_result["start_xy"], path_result["end_xy"]
+        ])
+        for requested, relocated in zip(nominal, selected):
+            ax.plot(
+                [requested[0], relocated[0]], [requested[1], relocated[1]],
+                color=PALETTE["guide"], linewidth=0.9, alpha=0.8, zorder=5,
+            )
+        ax.scatter(
+            nominal[:, 0], nominal[:, 1], marker="x", c=PALETTE["guide"],
+            linewidths=1.5, s=55, zorder=6, label="requested endpoints",
+        )
     ax.scatter(*path_result["start_xy"], c=PALETTE["sampling"], edgecolors="k", s=70,
                zorder=6, label="start")
     ax.scatter(*path_result["end_xy"], c=PALETTE["pmf"], edgecolors="k", s=70,

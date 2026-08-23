@@ -35,13 +35,18 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--no-calibrate", action="store_true")
     p.add_argument("--diagonal-noise", action="store_true",
                    help="Ignore cross-CV covariance within each window")
-    p.add_argument("--restrict-to-sampled-support", action="store_true",
-                   help="Restrict plots and path analysis to the sampled-data "
-                        "support instead of using the full rectangular grid")
-    p.add_argument("--support-radius", type=float, default=1.5,
-                   help="With --restrict-to-sampled-support, mask points farther "
-                        "than this many GP lengthscales from a sampled mean "
-                        "(default: 1.5)")
+    p.add_argument(
+        "--restrict-to-sampled-support",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Restrict plots and path analysis to the union of kernel-scaled "
+             "neighborhoods around sampled window means (default: enabled)",
+    )
+    p.add_argument(
+        "--support-radius", type=float, default=1.0,
+        help="Radius of each sampled neighborhood in GP lengthscales "
+             "(default: 1.0)",
+    )
     p.add_argument("--output-dir", default=None)
     p.add_argument("--output-prefix", default=None)
     p.add_argument("--no-plot", action="store_true",
@@ -54,6 +59,18 @@ def build_parser() -> argparse.ArgumentParser:
                    metavar=("X0", "Y0", "X1", "Y1"),
                    help="Physical (cv0,cv1) coords of the two states to connect "
                         "(default: the two deepest minima)")
+    p.add_argument(
+        "--path-endpoint-radius", type=float, default=None,
+        help="Search radius for relocating each requested endpoint to a "
+             "supported minimum, in GP lengthscales (default: support radius)",
+    )
+    p.add_argument(
+        "--adjust-path-endpoints",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Relocate requested endpoints to nearby supported minima "
+             "(default: enabled)",
+    )
     p.add_argument("--path-metric-scales", type=float, nargs=2, default=None,
                    metavar=("SCALE0", "SCALE1"),
                    help="Positive scale for each CV when defining path length and "
@@ -101,6 +118,8 @@ def main(argv=None) -> int:
         find_lowest_barrier=args.find_lowest_barrier_path,
         path_endpoints=((tuple(args.path_endpoints[:2]), tuple(args.path_endpoints[2:]))
                         if args.path_endpoints else None),
+        path_endpoint_radius=args.path_endpoint_radius,
+        adjust_path_endpoints=args.adjust_path_endpoints,
         path_metric_scale=(tuple(args.path_metric_scales)
                            if args.path_metric_scales else None),
         path_aligned_marginal=args.path_aligned_marginal,

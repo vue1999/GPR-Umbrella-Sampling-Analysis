@@ -30,16 +30,16 @@ def _quoted_assignment(section: str, key: str) -> str:
     return match.group(1)
 
 
-def test_public_api_is_exactly_the_three_supported_functions() -> None:
+def test_public_api_is_exactly_the_supported_functions() -> None:
     expected = [
         "reconstruct_pmf_1d",
         "reconstruct_pmf_2d",
         "find_lowest_barrier_path",
+        "sampled_support_mask",
     ]
     assert gpr_umbrella.__all__ == expected
     for name in expected:
         assert callable(getattr(gpr_umbrella, name))
-
 
 def test_distribution_name_and_console_script_targets() -> None:
     pyproject = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
@@ -84,6 +84,8 @@ def test_2d_path_options_are_exposed_and_find_mep_is_retired() -> None:
         "--path-aligned-marginal",
         "--thermal-energy",
         "--restrict-to-sampled-support",
+        "--path-endpoint-radius",
+        "--adjust-path-endpoints",
     } <= option_strings
     assert "--find-mep" not in option_strings
 
@@ -96,15 +98,21 @@ def test_2d_path_options_are_exposed_and_find_mep_is_retired() -> None:
     assert parsed.find_lowest_barrier_path is True
     assert parsed.path_aligned_marginal is True
     assert parsed.thermal_energy == pytest.approx(0.025)
-    assert parsed.restrict_to_sampled_support is False
+    assert parsed.restrict_to_sampled_support is True
+    assert parsed.support_radius == pytest.approx(1.0)
+    assert parsed.adjust_path_endpoints is True
 
     restricted = parser.parse_args([
         "--colvar-dir", "unused",
         "--restrict-to-sampled-support",
         "--support-radius", "2.25",
+        "--path-endpoint-radius", "0.75",
+        "--no-adjust-path-endpoints",
     ])
     assert restricted.restrict_to_sampled_support is True
     assert restricted.support_radius == pytest.approx(2.25)
+    assert restricted.path_endpoint_radius == pytest.approx(0.75)
+    assert restricted.adjust_path_endpoints is False
 
     with pytest.raises(SystemExit) as retired_option:
         parser.parse_args(["--colvar-dir", "unused", "--find-mep"])
@@ -123,6 +131,8 @@ def test_2d_cli_forwards_sampled_support_options(monkeypatch) -> None:
         "--colvar-dir", "unused",
         "--restrict-to-sampled-support",
         "--support-radius", "2.25",
+        "--path-endpoint-radius", "0.75",
+        "--no-adjust-path-endpoints",
         "--no-plot",
         "--no-diagnostics",
     ]) == 0
@@ -130,3 +140,5 @@ def test_2d_cli_forwards_sampled_support_options(monkeypatch) -> None:
     assert len(calls) == 1
     assert calls[0]["restrict_to_sampled_support"] is True
     assert calls[0]["support_radius"] == pytest.approx(2.25)
+    assert calls[0]["path_endpoint_radius"] == pytest.approx(0.75)
+    assert calls[0]["adjust_path_endpoints"] is False

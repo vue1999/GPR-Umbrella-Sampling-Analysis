@@ -12,7 +12,7 @@ import heapq
 import numpy as np
 from scipy.interpolate import RegularGridInterpolator
 from scipy.linalg import cho_solve
-from scipy.ndimage import minimum_filter
+from scipy.ndimage import label, minimum_filter
 from scipy.special import logsumexp
 
 
@@ -50,6 +50,145 @@ def find_minima(
 def _snap(xy, gx, gy) -> tuple[int, int]:
     return int(np.argmin(np.abs(gx - xy[0]))), int(np.argmin(np.abs(gy - xy[1])))
 
+
+def _support_components(support_mask: np.ndarray) -> tuple[np.ndarray, int]:
+    """Label support islands with the same 8-connectivity used by paths."""
+    structure = np.ones((3, 3), dtype=np.uint8)
+    return label(np.asarray(support_mask, dtype=bool), structure=structure)
+
+
+def _endpoint_candidates(
+    pmf: np.ndarray,
+    gx: np.ndarray,
+    gy: np.ndarray,
+    support_mask: np.ndarray,
+    components: np.ndarray,
+    nominal_xy,
+    lengthscale: np.ndarray,
+    radius: float,
+    endpoint_name: str,
+) -> list[dict]:
+    """Return the best supported endpoint candidate in each support island."""
+    nominal = np.asarray(nominal_xy, dtype=float)
+    if nominal.shape != (2,) or not np.all(np.isfinite(nominal)):
+        raise ValueError(f"{endpoint_name} endpoint must contain two finite values")
+    GX, GY = np.meshgrid(gx, gy, indexing="ij")
+    distance = np.sqrt(
+        ((GX - nominal[0]) / lengthscale[0]) ** 2
+        + ((GY - nominal[1]) / lengthscale[1]) ** 2
+    )
+    valid = np.asarray(support_mask, dtype=bool) & np.isfinite(pmf)
+    neighborhood = valid & (distance <= radius + 1.0e-12)
+    if not np.any(neighborhood):
+        nearest = float(np.min(distance[valid])) if np.any(valid) else np.inf
+        raise ValueError(
+            f"The {endpoint_name} endpoint neighborhood contains no supported "
+            f"grid point (radius={radius:g} GP lengthscales; nearest={nearest:.3g})"
+        )
+
+    work = np.where(valid, pmf, np.inf)
+    local = valid & (
+        work <= minimum_filter(work, size=3, mode="constant", cval=np.inf)
+    )
+
+    candidates = []
+    for component in np.unique(components[neighborhood]):
+        if component == 0:
+            continue
+        component_neighborhood = neighborhood & (components == component)
+        local_pool = component_neighborhood & local
+        used_fallback = not np.any(local_pool)
+        pool = component_neighborhood if used_fallback else local_pool
+        indices = np.argwhere(pool)
+        selected = indices[int(np.argmin(pmf[pool]))]
+        i, j = int(selected[0]), int(selected[1])
+        candidates.append({
+            "ij": (i, j),
+            "xy": (float(gx[i]), float(gy[j])),
+            "energy": float(pmf[i, j]),
+            "component": int(component),
+            "nominal_xy": (float(nominal[0]), float(nominal[1])),
+            "shift_kernel_distance": float(distance[i, j]),
+            "selection": (
+                "supported_neighborhood_minimum"
+                if used_fallback else "grid_local_minimum"
+            ),
+            "used_fallback": used_fallback,
+            "local_minima_in_neighborhood": int(
+                np.count_nonzero(component_neighborhood & local)
+            ),
+            "supported_points_in_neighborhood": int(
+                np.count_nonzero(component_neighborhood)
+            ),
+        })
+    return candidates
+
+
+def _adjust_endpoint_pair(
+    pmf: np.ndarray,
+    gx: np.ndarray,
+    gy: np.ndarray,
+    support_mask: np.ndarray,
+    endpoints,
+    lengthscale: np.ndarray,
+    radius: float,
+) -> tuple[dict, dict]:
+    """Choose nearby endpoint minima that belong to one support component."""
+    components, _ = _support_components(support_mask)
+    start_candidates = _endpoint_candidates(
+        pmf, gx, gy, support_mask, components, endpoints[0], lengthscale,
+        radius, "start",
+    )
+    end_candidates = _endpoint_candidates(
+        pmf, gx, gy, support_mask, components, endpoints[1], lengthscale,
+        radius, "end",
+    )
+    pairs = [
+        (start, end)
+        for start in start_candidates
+        for end in end_candidates
+        if start["component"] == end["component"] and start["ij"] != end["ij"]
+    ]
+    if not pairs:
+        start_components = sorted(item["component"] for item in start_candidates)
+        end_components = sorted(item["component"] for item in end_candidates)
+        raise ValueError(
+            "Endpoint neighborhoods do not reach the same connected sampled-"
+            "support component; increase support_radius or endpoint_search_radius. "
+            f"start components={start_components}, end components={end_components}"
+        )
+    return min(
+        pairs,
+        key=lambda pair: (
+            max(pair[0]["energy"], pair[1]["energy"]),
+            pair[0]["energy"] + pair[1]["energy"],
+            pair[0]["shift_kernel_distance"] + pair[1]["shift_kernel_distance"],
+        ),
+    )
+
+
+def _fixed_endpoint(
+    xy, gx, gy, pmf, support_mask, components, name, lengthscale
+) -> dict:
+    """Represent an explicitly requested endpoint without minimum adjustment."""
+    ij = _snap(xy, gx, gy)
+    if not support_mask[ij] or not np.isfinite(pmf[ij]):
+        raise ValueError(f"The snapped {name} endpoint is outside sampled support")
+    nominal = np.asarray(xy, dtype=float)
+    selected = np.array([gx[ij[0]], gy[ij[1]]], dtype=float)
+    shift = float(np.linalg.norm((selected - nominal) / lengthscale))
+    return {
+        "ij": ij,
+        "xy": (float(selected[0]), float(selected[1])),
+        "energy": float(pmf[ij]),
+        "component": int(components[ij]),
+        "nominal_xy": (float(nominal[0]), float(nominal[1])),
+        "shift_kernel_distance": shift,
+        "selection": "nearest_grid_point_no_adjustment",
+        "used_fallback": False,
+        "local_minima_in_neighborhood": 0,
+        "supported_points_in_neighborhood": 1,
+    }
 
 def _minimax_path(
     pmf: np.ndarray,
@@ -492,42 +631,152 @@ def find_lowest_barrier_path(
     max_minima: int = 8,
     metric_scale: tuple[float, float] | np.ndarray | None = None,
     *,
+    endpoint_search_radius: float | None = None,
+    adjust_endpoints: bool = True,
     path_aligned_marginal: bool = False,
     thermal_energy: float | None = None,
     perpendicular_points: int = 201,
     perpendicular_width: float | None = None,
 ) -> dict:
-    """Find a minimum-bottleneck path between two states on the PMF grid.
+    """Find a minimum-bottleneck path inside one sampled-support component.
 
     Grid length is only a tie-break between paths with the same bottleneck.
-    By default each CV is divided by its fitted GP lengthscale, making this
-    tie-break dimensionless and invariant to consistent unit conversions.
-    ``metric_scale`` may instead provide two positive, physically motivated
-    CV scales. If ``path_aligned_marginal`` is true, ``thermal_energy`` must
-    provide kBT in ``results['energy_unit']``; the returned path then includes
-    ``A(s) = -kBT log integral exp[-F(s,u)/kBT] du`` under
-    ``path_aligned_marginal``.
+    Explicit endpoints are moved to the lowest nearby supported minima by
+    default. ``endpoint_search_radius`` is measured in GP-lengthscale units;
+    when omitted it uses the reconstruction's sampled-support radius. Endpoint
+    selection and the complete path are restricted to one connected component
+    of ``results['support_mask']``. By default path length divides each CV by
+    its fitted GP lengthscale; ``metric_scale`` may override those two scales.
+    If ``path_aligned_marginal`` is true, ``thermal_energy`` supplies kBT in
+    ``results['energy_unit']``.
     """
     from .integration_2d import posterior_covariance_2d
+    gx = np.asarray(results["gx"], dtype=float)
+    gy = np.asarray(results["gy"], dtype=float)
+    pmf = np.asarray(results["pmf"], dtype=float)
+    support = np.asarray(
+        results.get("support_mask", np.ones_like(pmf)), dtype=bool
+    )
+    if pmf.shape != (len(gx), len(gy)) or support.shape != pmf.shape:
+        raise ValueError("PMF and support mask must match the gx/gy grid")
+    support = support & np.isfinite(pmf)
+    if not np.any(support):
+        raise ValueError("The sampled-support region contains no finite PMF point")
+    if not isinstance(adjust_endpoints, (bool, np.bool_)):
+        raise ValueError("adjust_endpoints must be Boolean")
 
-    gx, gy = results["gx"], results["gy"]
-    pmf = results["pmf"]
-    support = np.asarray(results.get("support_mask", np.ones_like(pmf)), dtype=bool)
-    minima = find_minima(pmf, gx, gy, max_minima=max_minima, support_mask=support)
+    try:
+        lengthscale = np.broadcast_to(
+            np.asarray(results["lengthscale"], dtype=float), (2,)
+        )
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ValueError(
+            "results lengthscale must be scalar or contain two values"
+        ) from exc
+    if not np.all(np.isfinite(lengthscale)) or np.any(lengthscale <= 0):
+        raise ValueError("results lengthscale must contain two finite positive values")
 
+    components, component_count = _support_components(support)
+    minima = find_minima(
+        pmf, gx, gy, max_minima=max_minima, support_mask=support
+    )
+    for minimum in minima:
+        minimum["support_component"] = int(components[minimum["ij"]])
+
+    resolved_endpoint_radius = None
     if endpoints is not None:
-        start_ij = _snap(endpoints[0], gx, gy)
-        end_ij = _snap(endpoints[1], gx, gy)
-    else:
-        if len(minima) < 2:
-            raise ValueError(
-                f"Need at least two supported minima, found {len(minima)}; "
-                "pass endpoints=((x0, y0), (x1, y1)) explicitly"
+        endpoint_values = np.asarray(endpoints, dtype=float)
+        if endpoint_values.shape != (2, 2) or not np.all(np.isfinite(endpoint_values)):
+            raise ValueError("endpoints must contain two finite (x, y) coordinates")
+        if adjust_endpoints:
+            resolved_endpoint_radius = endpoint_search_radius
+            if resolved_endpoint_radius is None:
+                resolved_endpoint_radius = results.get("support_radius")
+            if resolved_endpoint_radius is None:
+                resolved_endpoint_radius = 1.0
+            if isinstance(resolved_endpoint_radius, (bool, np.bool_)):
+                raise ValueError(
+                    "endpoint_search_radius must be finite and positive"
+                )
+            try:
+                resolved_endpoint_radius = float(resolved_endpoint_radius)
+            except (TypeError, ValueError) as exc:
+                raise ValueError(
+                    "endpoint_search_radius must be finite and positive"
+                ) from exc
+            if (
+                not np.isfinite(resolved_endpoint_radius)
+                or resolved_endpoint_radius <= 0
+            ):
+                raise ValueError(
+                    "endpoint_search_radius must be finite and positive"
+                )
+            start_endpoint, end_endpoint = _adjust_endpoint_pair(
+                pmf, gx, gy, support, endpoint_values, lengthscale,
+                float(resolved_endpoint_radius),
             )
-        start_ij, end_ij = minima[0]["ij"], minima[1]["ij"]
+        else:
+            start_endpoint = _fixed_endpoint(
+                endpoint_values[0], gx, gy, pmf, support, components,
+                "start", lengthscale,
+            )
+            end_endpoint = _fixed_endpoint(
+                endpoint_values[1], gx, gy, pmf, support, components,
+                "end", lengthscale,
+            )
+            if start_endpoint["component"] != end_endpoint["component"]:
+                raise ValueError(
+                    "Requested endpoints lie in disconnected sampled-support "
+                    "components; increase support_radius or adjust the endpoints"
+                )
+    else:
+        pairs = [
+            (first, second)
+            for index, first in enumerate(minima)
+            for second in minima[index + 1:]
+            if first["support_component"] == second["support_component"]
+        ]
+        if not pairs:
+            raise ValueError(
+                "No connected sampled-support component contains two detected "
+                f"minima (components={component_count}, minima={len(minima)}); "
+                "pass endpoints explicitly or increase support_radius"
+            )
+        first, second = min(
+            pairs,
+            key=lambda pair: (
+                max(pair[0]["energy"], pair[1]["energy"]),
+                pair[0]["energy"] + pair[1]["energy"],
+            ),
+        )
+        start_endpoint = {
+            **first,
+            "component": first["support_component"],
+            "nominal_xy": first["xy"],
+            "shift_kernel_distance": 0.0,
+            "selection": "global_supported_minimum",
+            "used_fallback": False,
+            "local_minima_in_neighborhood": 1,
+            "supported_points_in_neighborhood": 1,
+        }
+        end_endpoint = {
+            **second,
+            "component": second["support_component"],
+            "nominal_xy": second["xy"],
+            "shift_kernel_distance": 0.0,
+            "selection": "global_supported_minimum",
+            "used_fallback": False,
+            "local_minima_in_neighborhood": 1,
+            "supported_points_in_neighborhood": 1,
+        }
+
+    start_ij = start_endpoint["ij"]
+    end_ij = end_endpoint["ij"]
+    if start_ij == end_ij:
+        raise ValueError("The two selected endpoint minima collapse to one grid point")
 
     if metric_scale is None:
-        metric_scale = np.asarray(results["lengthscale"], dtype=float)
+        metric_scale = lengthscale.copy()
         metric_description = "dimensionless; CVs scaled by GP lengthscales"
     else:
         metric_scale = np.asarray(metric_scale, dtype=float)
@@ -581,6 +830,17 @@ def find_lowest_barrier_path(
         "sigma_calibrated": sigma_calibrated,
         "sigma": sigma_default,
         "minima": minima,
+        "nominal_start_xy": tuple(start_endpoint["nominal_xy"]),
+        "nominal_end_xy": tuple(end_endpoint["nominal_xy"]),
+        "start_endpoint": start_endpoint,
+        "end_endpoint": end_endpoint,
+        "endpoints_adjusted": bool(endpoints is not None and adjust_endpoints),
+        "endpoint_search_radius": (
+            float(resolved_endpoint_radius)
+            if resolved_endpoint_radius is not None else None
+        ),
+        "support_component": int(start_endpoint["component"]),
+        "support_component_count": int(component_count),
         "start_xy": (float(px[0]), float(py[0])),
         "end_xy": (float(px[-1]), float(py[-1])),
         "ts_xy": (float(px[ts]), float(py[ts])),
@@ -621,12 +881,23 @@ def save_lowest_barrier_path(path_result: dict, path: str) -> None:
     eu = path_result["energy_unit"]
     sx, sy = path_result["start_xy"]
     ex, ey = path_result["end_xy"]
+    nsx, nsy = path_result.get("nominal_start_xy", (sx, sy))
+    nex, ney = path_result.get("nominal_end_xy", (ex, ey))
+    endpoint_note = ""
+    if path_result.get("endpoints_adjusted", False):
+        radius = path_result["endpoint_search_radius"]
+        endpoint_note = (
+            f"requested start = ({nsx:.4f} {cvu[0]}, {nsy:.4f} {cvu[1]}); "
+            f"requested end = ({nex:.4f} {cvu[0]}, {ney:.4f} {cvu[1]}); "
+            f"endpoint search radius = {radius:.6g} GP lengthscales\n"
+        )
     tx, ty = path_result["ts_xy"]
     metric = np.asarray(path_result["metric_scale"], dtype=float)
     header = (
         "Lowest-barrier (minimum-bottleneck) grid path\n"
         f"path metric scales = ({metric[0]:.6g} {cvu[0]}, "
         f"{metric[1]:.6g} {cvu[1]})\n"
+        f"{endpoint_note}"
         f"start = ({sx:.4f} {cvu[0]}, {sy:.4f} {cvu[1]})\n"
         f"end = ({ex:.4f} {cvu[0]}, {ey:.4f} {cvu[1]})\n"
         f"transition-state candidate = ({tx:.4f} {cvu[0]}, {ty:.4f} {cvu[1]}) "
