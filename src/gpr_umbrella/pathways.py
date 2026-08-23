@@ -212,6 +212,24 @@ def _window_center_endpoint(
     }
 
 
+def _gradient_alignment_penalty(
+    gradient: np.ndarray,
+    start: tuple[int, int],
+    end: tuple[int, int],
+    direction: np.ndarray,
+    gradient_floor: float,
+) -> float:
+    """Return a weak-gradient-aware squared sine for one directed edge."""
+    local_gradient = 0.5 * (gradient[start] + gradient[end])
+    magnitude = float(np.linalg.norm(local_gradient))
+    if magnitude == 0.0:
+        return 0.0
+    cosine = float(np.dot(local_gradient, direction) / magnitude)
+    sine_squared = max(0.0, 1.0 - min(1.0, cosine * cosine))
+    reliability = magnitude**2 / (magnitude**2 + gradient_floor**2)
+    return reliability * sine_squared
+
+
 def _minimax_path(
     pmf: np.ndarray,
     start_ij: tuple[int, int],
@@ -219,14 +237,15 @@ def _minimax_path(
     dx_scaled: float,
     dy_scaled: float,
     support_mask: np.ndarray,
+    gradient_scaled: np.ndarray | None = None,
+    gradient_alignment_weight: float = 0.0,
 ) -> list[tuple[int, int]]:
-    """Find the shortest path at the globally minimal PMF bottleneck.
+    """Find a gradient-aligned path at the globally minimal PMF bottleneck.
 
     The first Dijkstra pass computes the exact minimax threshold. The second
-    pass computes the shortest metric path in the subgraph at or below that
-    threshold. Keeping these objectives separate is necessary: a longer prefix
-    with a lower provisional bottleneck can otherwise hide a shorter prefix
-    once both routes cross the same higher saddle.
+    pass minimizes an additive metric-length plus gradient-misalignment cost in
+    the subgraph at or below that threshold. A zero alignment weight recovers
+    the geometrically shortest path.
     """
     nx, ny = pmf.shape
     diagonal = float(np.hypot(dx_scaled, dy_scaled))
@@ -266,13 +285,32 @@ def _minimax_path(
 
     threshold = best[ti, tj]
     allowed = support_mask & (pmf <= threshold)
-    best_len = np.full((nx, ny), np.inf)
-    best_len[si, sj] = 0.0
+    if isinstance(gradient_alignment_weight, (bool, np.bool_)):
+        raise ValueError("gradient_alignment_weight must be finite and non-negative")
+    gradient_alignment_weight = float(gradient_alignment_weight)
+    if not np.isfinite(gradient_alignment_weight) or gradient_alignment_weight < 0:
+        raise ValueError("gradient_alignment_weight must be finite and non-negative")
+    gradient_floor = 1.0
+    if gradient_scaled is not None:
+        gradient_scaled = np.asarray(gradient_scaled, dtype=float)
+        if gradient_scaled.shape != pmf.shape + (2,):
+            raise ValueError("gradient_scaled must have shape pmf.shape + (2,)")
+        if not np.all(np.isfinite(gradient_scaled[allowed])):
+            raise ValueError("gradient_scaled must be finite in the minimax sublevel set")
+        magnitudes = np.linalg.norm(gradient_scaled[allowed], axis=1)
+        typical_gradient = float(np.median(magnitudes))
+        if typical_gradient > 0.0:
+            gradient_floor = 0.1 * typical_gradient
+    elif gradient_alignment_weight > 0.0:
+        raise ValueError("gradient_scaled is required when gradient alignment is enabled")
+
+    best_cost = np.full((nx, ny), np.inf)
+    best_cost[si, sj] = 0.0
     previous: dict[tuple[int, int], tuple[int, int]] = {}
     queue = [(0.0, si, sj)]
     while queue:
-        length, i, j = heapq.heappop(queue)
-        if length > best_len[i, j]:
+        cost, i, j = heapq.heappop(queue)
+        if cost > best_cost[i, j]:
             continue
         if (i, j) == (ti, tj):
             break
@@ -280,13 +318,23 @@ def _minimax_path(
             ni, nj = i + di, j + dj
             if not (0 <= ni < nx and 0 <= nj < ny and allowed[ni, nj]):
                 continue
-            new_length = length + distance
-            if new_length < best_len[ni, nj]:
-                best_len[ni, nj] = new_length
+            direction = np.array([di * dx_scaled, dj * dy_scaled]) / distance
+            alignment = (
+                _gradient_alignment_penalty(
+                    gradient_scaled, (i, j), (ni, nj), direction, gradient_floor
+                )
+                if gradient_scaled is not None else 0.0
+            )
+            edge_cost = distance * (
+                1.0 + gradient_alignment_weight * alignment
+            )
+            new_cost = cost + edge_cost
+            if new_cost < best_cost[ni, nj]:
+                best_cost[ni, nj] = new_cost
                 previous[(ni, nj)] = (i, j)
-                heapq.heappush(queue, (new_length, ni, nj))
+                heapq.heappush(queue, (new_cost, ni, nj))
 
-    if not np.isfinite(best_len[ti, tj]):
+    if not np.isfinite(best_cost[ti, tj]):
         raise RuntimeError("Internal error finding a path at the minimax threshold")
     path = [(ti, tj)]
     while path[-1] != (si, sj):
@@ -676,6 +724,32 @@ def _path_aligned_marginal_pmf(
     }
 
 
+def _posterior_mean_gradient_2d(
+    results: dict,
+    points: np.ndarray,
+    batch_size: int = 4096,
+) -> np.ndarray:
+    """Evaluate the derivative-observation GP posterior mean gradient."""
+    from .integration_2d import _k_grad_grad
+
+    state = results.get("_gp_state")
+    if not isinstance(state, dict):
+        raise ValueError("GP state is required for gradient-aligned path search")
+    points = np.atleast_2d(np.asarray(points, dtype=float))
+    training = np.asarray(state["X"], dtype=float)
+    alpha = np.asarray(state["alpha"], dtype=float)
+    sigma_f = float(state["sigma_f"])
+    lengthscale = np.asarray(state["lengthscale"], dtype=float)
+    gradient = np.empty((len(points), 2), dtype=float)
+    for start in range(0, len(points), batch_size):
+        stop = min(start + batch_size, len(points))
+        covariance = _k_grad_grad(
+            points[start:stop], training, sigma_f, lengthscale
+        )
+        gradient[start:stop] = (covariance @ alpha).reshape(-1, 2)
+    return gradient
+
+
 def find_lowest_barrier_path(
     results: dict,
     endpoints=None,
@@ -684,6 +758,7 @@ def find_lowest_barrier_path(
     *,
     endpoint_search_radius: float | None = None,
     adjust_endpoints: bool = True,
+    gradient_alignment_weight: float = 1.0,
     path_aligned_marginal: bool = False,
     thermal_energy: float | None = None,
     perpendicular_points: int = 201,
@@ -691,8 +766,8 @@ def find_lowest_barrier_path(
 ) -> dict:
     """Find a minimum-bottleneck path inside one path-valid component.
 
-    The barrier is minimized first; metric path length is minimized exactly
-    among all paths at that barrier.
+    The barrier is minimized first. Among paths at that exact barrier, an
+    additive metric-length plus GP-gradient-misalignment cost is minimized.
     Explicit endpoints are moved to the lowest nearby path-valid minima by
     default. With ``adjust_endpoints=False``, each endpoint instead uses the
     nearest restraint-window centre (snapped to the path grid).
@@ -702,6 +777,8 @@ def find_lowest_barrier_path(
     of ``results['path_valid_mask']`` when present, otherwise
     ``results['support_mask']``. By default path length divides each CV by
     its fitted GP lengthscale; ``metric_scale`` may override those two scales.
+    ``gradient_alignment_weight`` controls the secondary MEP-like preference;
+    zero recovers the geometrically shortest minimax path.
     If ``path_aligned_marginal`` is true, ``thermal_energy`` supplies kBT in
     ``results['energy_unit']``.
     """
@@ -865,8 +942,28 @@ def find_lowest_barrier_path(
 
     dx = float(gx[1] - gx[0]) if len(gx) > 1 else 1.0
     dy = float(gy[1] - gy[0]) if len(gy) > 1 else 1.0
+    if isinstance(gradient_alignment_weight, (bool, np.bool_)):
+        raise ValueError(
+            "gradient_alignment_weight must be finite and non-negative"
+        )
+    gradient_alignment_weight = float(gradient_alignment_weight)
+    if not np.isfinite(gradient_alignment_weight) or gradient_alignment_weight < 0:
+        raise ValueError(
+            "gradient_alignment_weight must be finite and non-negative"
+        )
+    gradient_scaled = None
+    if gradient_alignment_weight > 0.0:
+        grid_x, grid_y = np.meshgrid(gx, gy, indexing="ij")
+        grid_points = np.column_stack([grid_x.ravel(), grid_y.ravel()])
+        gradient_scaled = _posterior_mean_gradient_2d(
+            results, grid_points
+        ).reshape(pmf.shape + (2,))
+        gradient_scaled = gradient_scaled * metric_scale
+
     path = _minimax_path(
-        pmf, start_ij, end_ij, dx / metric_scale[0], dy / metric_scale[1], support
+        pmf, start_ij, end_ij, dx / metric_scale[0], dy / metric_scale[1],
+        support, gradient_scaled=gradient_scaled,
+        gradient_alignment_weight=gradient_alignment_weight,
     )
     pi = np.array([p[0] for p in path])
     pj = np.array([p[1] for p in path])
@@ -878,6 +975,37 @@ def find_lowest_barrier_path(
     energy = pmf[pi, pj]
     energy_relative = energy - energy[0]
     ts = int(np.argmax(energy_relative))
+
+    median_abs_gradient_cosine = None
+    length_weighted_gradient_misalignment = None
+    if gradient_scaled is not None:
+        threshold_mask = support & (pmf <= float(np.max(energy)))
+        typical_gradient = float(np.median(
+            np.linalg.norm(gradient_scaled[threshold_mask], axis=1)
+        ))
+        gradient_floor = 0.1 * typical_gradient if typical_gradient > 0.0 else 1.0
+        edge_gradient = 0.5 * (
+            gradient_scaled[pi[:-1], pj[:-1]]
+            + gradient_scaled[pi[1:], pj[1:]]
+        )
+        edge_magnitude = np.linalg.norm(edge_gradient, axis=1)
+        edge_direction = np.column_stack([
+            np.diff(pi) * dx / metric_scale[0],
+            np.diff(pj) * dy / metric_scale[1],
+        ]) / ds[:, None]
+        cosine = np.abs(np.einsum(
+            "ij,ij->i", edge_gradient, edge_direction
+        )) / np.maximum(edge_magnitude, np.finfo(float).tiny)
+        cosine = np.clip(cosine, 0.0, 1.0)
+        reliable = edge_magnitude >= gradient_floor
+        if np.any(reliable):
+            median_abs_gradient_cosine = float(np.median(cosine[reliable]))
+        reliability = edge_magnitude**2 / (
+            edge_magnitude**2 + gradient_floor**2
+        )
+        length_weighted_gradient_misalignment = float(np.average(
+            reliability * (1.0 - cosine**2), weights=ds
+        ))
 
     points = np.column_stack([px, py])
     covariance_to_start = posterior_covariance_2d(
@@ -929,7 +1057,16 @@ def find_lowest_barrier_path(
         "bottleneck_energy": float(np.max(energy)),
         "path_metric_length": float(s[-1]),
         "path_graph_connectivity": 8,
-        "path_objective": "minimum_bottleneck_then_shortest_metric_length",
+        "path_objective": (
+            "minimum_bottleneck_then_gradient_aligned_metric_cost"
+            if gradient_alignment_weight > 0.0
+            else "minimum_bottleneck_then_shortest_metric_length"
+        ),
+        "path_gradient_alignment_weight": gradient_alignment_weight,
+        "path_median_abs_gradient_cosine": median_abs_gradient_cosine,
+        "path_length_weighted_gradient_misalignment": (
+            length_weighted_gradient_misalignment
+        ),
         "barrier": float(energy_relative[ts]),
         "barrier_err_raw": float(sigma_raw[ts]),
         "barrier_err_calibrated": float(sigma_calibrated[ts]),
@@ -990,10 +1127,22 @@ def save_lowest_barrier_path(path_result: dict, path: str) -> None:
             )
     tx, ty = path_result["ts_xy"]
     metric = np.asarray(path_result["metric_scale"], dtype=float)
+    alignment_note = ""
+    if path_result.get("path_median_abs_gradient_cosine") is not None:
+        alignment_note = (
+            "gradient alignment: median |cos| = "
+            f"{path_result['path_median_abs_gradient_cosine']:.4f}; "
+            "length-weighted misalignment = "
+            f"{path_result['path_length_weighted_gradient_misalignment']:.4f}\n"
+        )
     header = (
         "Lowest-barrier (minimum-bottleneck) grid path\n"
         f"path metric scales = ({metric[0]:.6g} {cvu[0]}, "
         f"{metric[1]:.6g} {cvu[1]})\n"
+        f"path objective = {path_result['path_objective']}; "
+        f"gradient weight = "
+        f"{path_result.get('path_gradient_alignment_weight', 0.0):.6g}\n"
+        f"{alignment_note}"
         f"{endpoint_note}"
         f"start = ({sx:.4f} {cvu[0]}, {sy:.4f} {cvu[1]})\n"
         f"end = ({ex:.4f} {cvu[0]}, {ey:.4f} {cvu[1]})\n"

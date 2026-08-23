@@ -86,6 +86,7 @@ def test_2d_path_options_are_exposed_and_find_mep_is_retired() -> None:
         "--restrict-to-sampled-support",
         "--path-endpoint-radius",
         "--adjust-path-endpoints",
+        "--path-gradient-weight",
     } <= option_strings
     assert "--find-mep" not in option_strings
 
@@ -101,18 +102,21 @@ def test_2d_path_options_are_exposed_and_find_mep_is_retired() -> None:
     assert parsed.restrict_to_sampled_support is True
     assert parsed.support_radius == pytest.approx(0.5)
     assert parsed.adjust_path_endpoints is True
+    assert parsed.path_gradient_weight == pytest.approx(1.0)
 
     restricted = parser.parse_args([
         "--colvar-dir", "unused",
         "--restrict-to-sampled-support",
         "--support-radius", "2.25",
         "--path-endpoint-radius", "0.75",
+        "--path-gradient-weight", "2.5",
         "--no-adjust-path-endpoints",
     ])
     assert restricted.restrict_to_sampled_support is True
     assert restricted.support_radius == pytest.approx(2.25)
     assert restricted.path_endpoint_radius == pytest.approx(0.75)
     assert restricted.adjust_path_endpoints is False
+    assert restricted.path_gradient_weight == pytest.approx(2.5)
 
     with pytest.raises(SystemExit) as retired_option:
         parser.parse_args(["--colvar-dir", "unused", "--find-mep"])
@@ -132,6 +136,7 @@ def test_2d_cli_forwards_sampled_support_options(monkeypatch) -> None:
         "--restrict-to-sampled-support",
         "--support-radius", "2.25",
         "--path-endpoint-radius", "0.75",
+        "--path-gradient-weight", "2.5",
         "--no-adjust-path-endpoints",
         "--no-plot",
         "--no-diagnostics",
@@ -142,3 +147,4 @@ def test_2d_cli_forwards_sampled_support_options(monkeypatch) -> None:
     assert calls[0]["support_radius"] == pytest.approx(2.25)
     assert calls[0]["path_endpoint_radius"] == pytest.approx(0.75)
     assert calls[0]["adjust_path_endpoints"] is False
+    assert calls[0]["path_gradient_weight"] == pytest.approx(2.5)

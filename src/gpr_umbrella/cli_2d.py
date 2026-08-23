@@ -73,6 +73,11 @@ def build_parser() -> argparse.ArgumentParser:
              "disable to use the nearest restraint-window centres "
              "(default: enabled)",
     )
+    p.add_argument(
+        "--path-gradient-weight", type=float, default=1.0,
+        help="Gradient-alignment weight among exact minimum-barrier paths; "
+             "zero gives the geometric shortest path (default: 1.0)",
+    )
     p.add_argument("--path-metric-scales", type=float, nargs=2, default=None,
                    metavar=("SCALE0", "SCALE1"),
                    help="Positive scale for each CV when defining path length and "
@@ -122,6 +127,7 @@ def main(argv=None) -> int:
                         if args.path_endpoints else None),
         path_endpoint_radius=args.path_endpoint_radius,
         adjust_path_endpoints=args.adjust_path_endpoints,
+        path_gradient_weight=args.path_gradient_weight,
         path_metric_scale=(tuple(args.path_metric_scales)
                            if args.path_metric_scales else None),
         path_aligned_marginal=args.path_aligned_marginal,

@@ -125,6 +125,40 @@ def test_path_metric_scale_must_be_finite(metric_scale):
         )
 
 
+def test_gradient_alignment_is_a_secondary_objective_after_exact_bottleneck():
+    pmf = np.zeros((5, 3))
+    support = np.zeros_like(pmf, dtype=bool)
+    support[:, 1:] = True
+    gradient = np.zeros(pmf.shape + (2,))
+    gradient[:, 1, 1] = 1.0
+    gradient[:, 2, 0] = 1.0
+    start, end = (0, 1), (4, 1)
+
+    shortest = _minimax_path(
+        pmf, start, end, 1.0, 1.0, support,
+        gradient_scaled=gradient, gradient_alignment_weight=0.0,
+    )
+    aligned = _minimax_path(
+        pmf, start, end, 1.0, 1.0, support,
+        gradient_scaled=gradient, gradient_alignment_weight=1.0,
+    )
+
+    assert all(index[1] == 1 for index in shortest)
+    assert any(index[1] == 2 for index in aligned)
+    assert max(pmf[index] for index in shortest) == 0.0
+    assert max(pmf[index] for index in aligned) == 0.0
+
+
+@pytest.mark.parametrize("weight", [-1.0, np.nan, np.inf, True])
+def test_gradient_alignment_weight_must_be_finite_and_non_negative(weight):
+    with pytest.raises(ValueError, match="finite and non-negative"):
+        find_lowest_barrier_path(
+            _analytic_results(),
+            endpoints=((-1.0, 0.0), (1.0, 0.0)),
+            gradient_alignment_weight=weight,
+        )
+
+
 def test_isolated_supported_normal_point_is_not_extended_into_extrapolation():
     coordinate = np.linspace(-1.0, 1.0, 5)
     points = np.column_stack([np.zeros(5), coordinate])
@@ -193,6 +227,7 @@ def test_path_aligned_marginal_requires_positive_thermal_energy(thermal_energy):
             results,
             endpoints=((-1.0, 0.0), (1.0, 0.0)),
             metric_scale=(1.0, 1.0),
+            gradient_alignment_weight=0.0,
             path_aligned_marginal=True,
             thermal_energy=thermal_energy,
             perpendicular_points=11,
@@ -274,6 +309,7 @@ def test_corner_stations_with_zero_normal_measure_are_omitted():
         results,
         endpoints=((-1.0, -1.0), (1.0, 1.0)),
         metric_scale=(1.0, 1.0),
+        gradient_alignment_weight=0.0,
         path_aligned_marginal=True,
         thermal_energy=0.4,
         perpendicular_points=31,
@@ -444,6 +480,8 @@ def test_endpoint_minimum_search_can_be_disabled_in_favor_of_window_centres(
     header = output.read_text()
     assert "endpoint selection = nearest restraint-window centres" in header
     assert "window indices = (0, 2)" in header
+    assert "gradient weight = 1" in header
+    assert "gradient alignment: median |cos|" in header
 
 
 def test_window_centre_endpoint_must_be_path_valid():
@@ -461,35 +499,58 @@ def test_window_centre_endpoint_must_be_path_valid():
         )
 
 
-def _independent_graph_optimum(pmf, support, start, end, dx, dy):
+def _test_edge_weight(
+    gradient, start, end, di, dj, dx, dy, gradient_floor, alignment_weight,
+):
+    distance = float(np.hypot(di * dx, dj * dy))
+    if gradient is None or alignment_weight == 0.0:
+        return distance
+    local = 0.5 * (gradient[start] + gradient[end])
+    magnitude = float(np.linalg.norm(local))
+    direction = np.array([di * dx, dj * dy]) / distance
+    cosine = float(np.dot(local, direction) / max(magnitude, np.finfo(float).tiny))
+    sine_squared = max(0.0, 1.0 - min(1.0, cosine * cosine))
+    reliability = magnitude**2 / (magnitude**2 + gradient_floor**2)
+    return distance * (1.0 + alignment_weight * reliability * sine_squared)
+
+
+def _independent_graph_optimum(
+    pmf, support, start, end, dx, dy, gradient=None, alignment_weight=0.0,
+):
     """Solve the discrete lexicographic objective via SciPy graph routines."""
     shape = pmf.shape
     node_count = pmf.size
     start_flat = np.ravel_multi_index(start, shape)
     end_flat = np.ravel_multi_index(end, shape)
     steps = [
-        (-1, 0, dx), (1, 0, dx),
-        (0, -1, dy), (0, 1, dy),
-        (-1, -1, np.hypot(dx, dy)), (-1, 1, np.hypot(dx, dy)),
-        (1, -1, np.hypot(dx, dy)), (1, 1, np.hypot(dx, dy)),
+        (-1, 0), (1, 0), (0, -1), (0, 1),
+        (-1, -1), (-1, 1), (1, -1), (1, 1),
     ]
     for threshold in np.unique(pmf[support]):
         allowed = support & (pmf <= threshold)
         if not allowed[start] or not allowed[end]:
             continue
+        gradient_floor = 1.0
+        if gradient is not None:
+            typical = float(np.median(np.linalg.norm(gradient[allowed], axis=1)))
+            if typical > 0.0:
+                gradient_floor = 0.1 * typical
         rows, columns, weights = [], [], []
         for i, j in np.argwhere(allowed):
             source = np.ravel_multi_index((i, j), shape)
-            for di, dj, weight in steps:
+            for di, dj in steps:
                 ni, nj = i + di, j + dj
                 if 0 <= ni < shape[0] and 0 <= nj < shape[1] and allowed[ni, nj]:
                     rows.append(source)
                     columns.append(np.ravel_multi_index((ni, nj), shape))
-                    weights.append(weight)
+                    weights.append(_test_edge_weight(
+                        gradient, (i, j), (ni, nj), di, dj, dx, dy,
+                        gradient_floor, alignment_weight,
+                    ))
         graph = csr_matrix((weights, (rows, columns)), shape=(node_count, node_count))
         distances = dijkstra(graph, directed=True, indices=start_flat)
         if np.isfinite(distances[end_flat]):
-            return float(threshold), float(distances[end_flat])
+            return float(threshold), float(distances[end_flat]), gradient_floor
     raise AssertionError("Test support unexpectedly disconnects its endpoints")
 
 
@@ -510,12 +571,46 @@ def test_minimax_path_matches_independent_global_graph_optimum(seed):
         np.hypot((b[0] - a[0]) * dx, (b[1] - a[1]) * dy)
         for a, b in zip(path, path[1:])
     )
-    expected_bottleneck, expected_length = _independent_graph_optimum(
+    expected_bottleneck, expected_length, _ = _independent_graph_optimum(
         pmf, support, start, end, dx, dy
     )
 
     assert returned_bottleneck == pytest.approx(expected_bottleneck)
     assert returned_length == pytest.approx(expected_length)
+
+
+@pytest.mark.parametrize("seed", range(6))
+def test_gradient_weighted_path_matches_independent_global_graph_optimum(seed):
+    rng = np.random.default_rng(100 + seed)
+    pmf = rng.normal(size=(4, 4))
+    support = rng.random((4, 4)) > 0.25
+    support[0, :] = True
+    support[:, -1] = True
+    gradient = rng.normal(size=pmf.shape + (2,))
+    start, end = (0, 0), (3, 3)
+    dx, dy, weight = 0.7, 1.3, 1.0
+
+    path = _minimax_path(
+        pmf, start, end, dx, dy, support,
+        gradient_scaled=gradient, gradient_alignment_weight=weight,
+    )
+    returned_bottleneck = max(pmf[index] for index in path)
+    expected_bottleneck, expected_cost, gradient_floor = (
+        _independent_graph_optimum(
+            pmf, support, start, end, dx, dy,
+            gradient=gradient, alignment_weight=weight,
+        )
+    )
+    returned_cost = sum(
+        _test_edge_weight(
+            gradient, a, b, b[0] - a[0], b[1] - a[1], dx, dy,
+            gradient_floor, weight,
+        )
+        for a, b in zip(path, path[1:])
+    )
+
+    assert returned_bottleneck == pytest.approx(expected_bottleneck)
+    assert returned_cost == pytest.approx(expected_cost)
 
 
 def test_path_avoids_cells_excluded_by_the_path_valid_mask():

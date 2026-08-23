@@ -199,13 +199,18 @@ python examples/run_synthetic_2d_demo.py   # reconstructs a known 2D PMF
 ### Lowest-barrier paths and path-aligned marginal PMFs
 
 `find_lowest_barrier_path` finds the grid path whose highest PMF is
-as low as possible. It first computes the exact minimax PMF threshold, then
-finds the shortest lengthscale-scaled path within the path-valid cells at or
-below that threshold. This guarantees the global minimum barrier, followed by
-the globally shortest tie-break, on the finite 8-neighbor grid graph. It is not
-a guarantee for the underlying continuous GPR surface between grid points, and
-it is a minimum-bottleneck path rather than a string- or NEB-refined
-minimum-energy path:
+as low as possible. It first computes the exact minimax PMF threshold. Inside
+that exact sublevel set, it minimizes an additive path cost consisting of
+lengthscale-scaled edge length plus a GP-gradient-misalignment penalty. The
+default dimensionless `gradient_alignment_weight=1.0` (CLI:
+`--path-gradient-weight 1.0`) penalizes motion perpendicular to the predicted
+free-energy gradient; weak-gradient regions are automatically downweighted.
+Set the weight to zero to recover the geometrically shortest minimax path.
+Thus the barrier and the chosen secondary objective are both globally optimal
+on the finite 8-neighbor grid graph. This is not a guarantee for the underlying
+continuous GPR surface between grid points, and the result remains an MEP-like
+minimum-bottleneck path rather than a string- or NEB-refined minimum-energy
+path:
 
 ```python
 from gpr_umbrella import find_lowest_barrier_path

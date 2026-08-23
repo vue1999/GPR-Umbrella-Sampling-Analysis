@@ -538,6 +538,7 @@ def reconstruct_pmf_2d(
     path_metric_scale: tuple[float, float] | None = None,
     path_endpoint_radius: float | None = None,
     adjust_path_endpoints: bool = True,
+    path_gradient_weight: float = 1.0,
     path_aligned_marginal: bool = False,
     thermal_energy: float | None = None,
     perpendicular_points: int = 201,
@@ -563,7 +564,8 @@ def reconstruct_pmf_2d(
     Explicit path endpoints are moved to nearby path-valid minima by default;
     ``path_endpoint_radius`` controls that search in GP-lengthscale units. Set
     ``adjust_path_endpoints=False`` to use the nearest restraint-window centres
-    instead.
+    instead. ``path_gradient_weight`` controls the MEP-like gradient-alignment
+    preference among exact minimum-barrier paths; zero selects the shortest.
     """
     if (colvar_dir is None) == (data is None):
         raise ValueError("Provide exactly one of colvar_dir or data.")
@@ -891,6 +893,7 @@ def reconstruct_pmf_2d(
             metric_scale=path_metric_scale,
             endpoint_search_radius=path_endpoint_radius,
             adjust_endpoints=adjust_path_endpoints,
+            gradient_alignment_weight=path_gradient_weight,
             path_aligned_marginal=path_aligned_marginal,
             thermal_energy=thermal_energy,
             perpendicular_points=perpendicular_points,
