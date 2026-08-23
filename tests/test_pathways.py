@@ -654,3 +654,111 @@ def test_disconnected_endpoint_neighborhoods_fail_with_actionable_error():
             endpoints=((-1.0, 0.0), (1.0, 0.0)),
             endpoint_search_radius=0.25,
         )
+
+
+def test_uncertainty_weight_selects_lower_uncertainty_minimax_route(monkeypatch):
+    results = _analytic_results()
+
+    def synthetic_uncertainty(results, points, latent_variance, reference):
+        sigma = np.where(
+            (np.abs(points[:, 1]) < 0.1) & (np.abs(points[:, 0]) < 0.9),
+            2.0,
+            0.0,
+        )
+        sigma[reference] = 0.0
+        return sigma, sigma, sigma
+
+    monkeypatch.setattr(
+        "gpr_umbrella.pathways.relative_uncertainty", synthetic_uncertainty
+    )
+    common = dict(
+        endpoints=((-1.0, 0.0), (1.0, 0.0)),
+        adjust_endpoints=False,
+        gradient_alignment_weight=0.0,
+        metric_scale=(1.0, 1.0),
+    )
+    mean_path = find_lowest_barrier_path(results, **common)
+    risk_path = find_lowest_barrier_path(
+        results, uncertainty_weight=1.0, **common
+    )
+
+    np.testing.assert_allclose(mean_path["y"], 0.0)
+    assert np.max(np.abs(risk_path["y"])) >= 0.19
+    assert risk_path["path_uncertainty_weight"] == pytest.approx(1.0)
+    assert "upper_confidence" in risk_path["path_objective"]
+
+
+def test_corridor_path_stays_within_reference_radius():
+    results = _analytic_results()
+    reference = np.array([[-1.0, 0.0], [1.0, 0.0]])
+    path = find_lowest_barrier_path(
+        results,
+        endpoints=((-1.0, 0.0), (1.0, 0.0)),
+        adjust_endpoints=False,
+        gradient_alignment_weight=0.0,
+        metric_scale=(1.0, 1.0),
+        reference_path=reference,
+        path_mode="corridor",
+        corridor_radius=0.21,
+    )
+
+    assert path["path_mode"] == "corridor"
+    assert path["max_reference_distance"] <= 0.21 + 1e-12
+    assert np.max(np.abs(path["y"])) <= 0.21 + 1e-12
+
+
+def test_fixed_reference_path_is_evaluated_without_grid_search():
+    results = _analytic_results()
+    reference = np.array([[-1.0, 0.0], [0.0, 0.4], [1.0, 0.0]])
+    path = find_lowest_barrier_path(
+        results,
+        reference_path=reference,
+        path_mode="fixed",
+        metric_scale=(1.0, 1.0),
+    )
+
+    assert path["path_mode"] == "fixed"
+    assert path["path_objective"] == "fixed_reference_trajectory"
+    assert path["start_xy"] == pytest.approx(tuple(reference[0]))
+    assert path["end_xy"] == pytest.approx(tuple(reference[-1]))
+    assert path["barrier"] == pytest.approx(
+        np.max(path["pmf"]) - np.min(path["pmf"])
+    )
+    assert any(np.allclose([x, y], reference[1])
+               for x, y in zip(path["x"], path["y"]))
+
+
+def test_fixed_reference_path_must_remain_path_valid():
+    results = _analytic_results()
+    results["path_valid_mask"] = np.broadcast_to(
+        np.abs(results["gy"])[None, :] < 0.3, results["pmf"].shape
+    ).copy()
+    with pytest.raises(ValueError, match="leaves the path-valid region"):
+        find_lowest_barrier_path(
+            results,
+            reference_path=np.array([[-1.0, 0.0], [0.0, 1.0], [1.0, 0.0]]),
+            path_mode="fixed",
+            metric_scale=(1.0, 1.0),
+        )
+
+
+def test_reference_modes_reject_missing_or_disjoint_geometry():
+    results = _analytic_results()
+    with pytest.raises(ValueError, match="requires reference_path"):
+        find_lowest_barrier_path(results, path_mode="fixed")
+    with pytest.raises(ValueError, match="does not overlap"):
+        find_lowest_barrier_path(
+            results,
+            reference_path=np.array([[-1.0, 20.0], [1.0, 20.0]]),
+            path_mode="corridor",
+            corridor_radius=0.1,
+            metric_scale=(1.0, 1.0),
+        )
+    with pytest.raises(ValueError, match="cannot select among a fixed path"):
+        find_lowest_barrier_path(
+            results,
+            reference_path=np.array([[-1.0, 0.0], [1.0, 0.0]]),
+            path_mode="fixed",
+            uncertainty_weight=1.0,
+            metric_scale=(1.0, 1.0),
+        )

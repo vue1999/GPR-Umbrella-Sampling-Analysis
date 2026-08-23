@@ -198,23 +198,28 @@ python examples/run_synthetic_2d_demo.py   # reconstructs a known 2D PMF
 
 ### Lowest-barrier paths and path-aligned marginal PMFs
 
-`find_lowest_barrier_path` finds the grid path whose highest PMF is
-as low as possible. It first computes the exact minimax PMF threshold. Inside
-that exact sublevel set, it minimizes an additive path cost consisting of
-lengthscale-scaled edge length plus a GP-gradient-misalignment penalty. The
-default dimensionless `gradient_alignment_weight=1.0` (CLI:
-`--path-gradient-weight 1.0`) penalizes motion perpendicular to the predicted
-free-energy gradient; weak-gradient regions are automatically downweighted.
-Set the weight to zero to recover the geometrically shortest minimax path.
-Thus the absolute bottleneck and the chosen secondary objective are both
-globally optimal on the finite 8-neighbor grid graph. The reported barrier is
-the PMF range on that selected path, `max(path PMF) - min(path PMF)`, and its
-uncertainty uses the posterior covariance between those two path points.
-Reaction ΔF remains end minus start. Because the visited minimum may lie away
-from the start, the reported range is not itself the graph-search objective.
-The grid result is not a guarantee for the underlying continuous GPR surface
-between grid points, and remains an MEP-like minimum-bottleneck path rather
-than a string- or NEB-refined minimum-energy path:
+By default, `find_lowest_barrier_path` finds the grid path whose highest PMF is
+as low as possible. It computes the exact minimax threshold, then minimizes an
+additive lengthscale-scaled path cost inside that exact sublevel set. The
+default `gradient_alignment_weight=1.0` (CLI: `--path-gradient-weight 1.0`)
+adds a weak-gradient-aware penalty for motion perpendicular to the predicted
+free-energy gradient. Set it to zero for the geometrically shortest minimax
+path.
+
+Uncertainty-aware selection is opt-in. A positive `uncertainty_weight=beta`
+(CLI: `--path-uncertainty-weight BETA`) replaces the node score by the
+one-sided upper-confidence quantity
+`mean dF from start + beta * sigma(dF from start)`. The graph algorithm exactly
+minimizes the largest such score. `beta=1` is a one-sigma risk-aware path;
+`beta=0` preserves the mean-only result. This takes uncertainty into account
+when choosing the path, but does not integrate over uncertainty in which path
+is selected.
+
+The reported barrier is always `max(path PMF) - min(path PMF)`, with uncertainty
+from the full posterior covariance between those two points. Reaction ΔF
+remains end minus start. The searched bottleneck and secondary cost are exact
+on the finite 8-neighbor graph; they are not guarantees for the continuous GPR
+surface and do not constitute NEB/string refinement:
 
 ```python
 from gpr_umbrella import find_lowest_barrier_path
@@ -241,6 +246,29 @@ window-anchored PMF range). The complete minimum-bottleneck path may move
 anywhere in that component; disconnected endpoint neighborhoods produce an
 actionable error instead of silently crossing an invalid region.
 
+A supplied two-column trajectory can either be enforced exactly or used as a
+soft corridor constraint:
+
+```bash
+# Evaluate the supplied trajectory; no graph search is performed.
+gpr-umbrella-2d --colvar-dir COLVAR --kappa-dir COLVAR \
+    --find-lowest-barrier-path --path-mode fixed \
+    --path-reference neb_xy.dat
+
+# Search only near that trajectory.
+gpr-umbrella-2d --colvar-dir COLVAR --kappa-dir COLVAR \
+    --find-lowest-barrier-path --path-mode corridor \
+    --path-reference neb_xy.dat --path-corridor-radius 0.5
+```
+
+The reference file may contain comments beginning with `#`; its first two
+columns are the two CV coordinates. A fixed trajectory is densified for stable
+barrier evaluation and must remain inside the same trustworthy `path_valid`
+region used by the free search. Corridor mode intersects that valid region with
+a tube around the reference polyline. The radius is dimensionless in the path
+metric: with isotropic 0.5 A metric scales, radius 0.5 corresponds to 0.25 A.
+Disconnected corridors and invalid fixed trajectories fail explicitly.
+
 The 2D CLI can find that path and optionally compute the path-aligned marginal
 PMF, `A(s)`, by Boltzmann-integrating the transverse coordinate `u` at each
 position along the path:
@@ -260,6 +288,19 @@ and transverse coordinate `u` are dimensionless metric arclengths.
 The marginal profile is written to `*_path_aligned_pmf_1d.dat`; the
 lowest-barrier path itself is written to `*_lowest_barrier_path.dat` and
 `*_lowest_barrier_path.png` when the corresponding outputs are enabled.
+
+### Path implementation structure
+
+The pathway contribution is split by responsibility to keep reviews local:
+
+- `path_graph.py` contains only the generic two-pass minimax/Dijkstra solver.
+- `trajectory.py` validates, densifies, and measures distances to reference paths.
+- `path_profile.py` evaluates path PMFs and covariance-aware differences.
+- `pathways.py` orchestrates endpoints, validity masks, modes, and optional
+  transverse marginalization.
+
+The existing `find_lowest_barrier_path` entry point and default mean-only free
+search are preserved for compatibility.
 
 ## Citation
 

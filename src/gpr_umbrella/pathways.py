@@ -7,13 +7,19 @@ condition and normally requires string- or NEB-like refinement.
 """
 from __future__ import annotations
 
-import heapq
-
 import numpy as np
 from scipy.interpolate import RegularGridInterpolator
 from scipy.linalg import cho_solve
 from scipy.ndimage import label, minimum_filter
 from scipy.special import logsumexp
+
+from .path_graph import minimax_path as _minimax_path
+from .path_profile import evaluate_path_profile, relative_uncertainty
+from .trajectory import (
+    distance_to_polyline,
+    resample_polyline,
+    validate_reference_path,
+)
 
 
 def find_minima(
@@ -210,136 +216,6 @@ def _window_center_endpoint(
         "local_minima_in_neighborhood": 0,
         "supported_points_in_neighborhood": 1,
     }
-
-
-def _gradient_alignment_penalty(
-    gradient: np.ndarray,
-    start: tuple[int, int],
-    end: tuple[int, int],
-    direction: np.ndarray,
-    gradient_floor: float,
-) -> float:
-    """Return a weak-gradient-aware squared sine for one directed edge."""
-    local_gradient = 0.5 * (gradient[start] + gradient[end])
-    magnitude = float(np.linalg.norm(local_gradient))
-    if magnitude == 0.0:
-        return 0.0
-    cosine = float(np.dot(local_gradient, direction) / magnitude)
-    sine_squared = max(0.0, 1.0 - min(1.0, cosine * cosine))
-    reliability = magnitude**2 / (magnitude**2 + gradient_floor**2)
-    return reliability * sine_squared
-
-
-def _minimax_path(
-    pmf: np.ndarray,
-    start_ij: tuple[int, int],
-    end_ij: tuple[int, int],
-    dx_scaled: float,
-    dy_scaled: float,
-    support_mask: np.ndarray,
-    gradient_scaled: np.ndarray | None = None,
-    gradient_alignment_weight: float = 0.0,
-) -> list[tuple[int, int]]:
-    """Find a gradient-aligned path at the globally minimal PMF bottleneck.
-
-    The first Dijkstra pass computes the exact minimax threshold. The second
-    pass minimizes an additive metric-length plus gradient-misalignment cost in
-    the subgraph at or below that threshold. A zero alignment weight recovers
-    the geometrically shortest path.
-    """
-    nx, ny = pmf.shape
-    diagonal = float(np.hypot(dx_scaled, dy_scaled))
-    # Axis 0 indexes gx and therefore uses dx; axis 1 uses dy.
-    steps = [
-        (-1, 0, dx_scaled), (1, 0, dx_scaled),
-        (0, -1, dy_scaled), (0, 1, dy_scaled),
-        (-1, -1, diagonal), (-1, 1, diagonal),
-        (1, -1, diagonal), (1, 1, diagonal),
-    ]
-
-    best = np.full((nx, ny), np.inf)
-    si, sj = start_ij
-    ti, tj = end_ij
-    if not support_mask[si, sj] or not support_mask[ti, tj]:
-        raise ValueError("Both pathway endpoints must lie in the path-valid region")
-    best[si, sj] = pmf[si, sj]
-    queue = [(pmf[si, sj], si, sj)]
-
-    while queue:
-        bottleneck, i, j = heapq.heappop(queue)
-        if bottleneck > best[i, j]:
-            continue
-        if (i, j) == (ti, tj):
-            break
-        for di, dj, _ in steps:
-            ni, nj = i + di, j + dj
-            if not (0 <= ni < nx and 0 <= nj < ny and support_mask[ni, nj]):
-                continue
-            new_bottleneck = max(bottleneck, pmf[ni, nj])
-            if new_bottleneck < best[ni, nj]:
-                best[ni, nj] = new_bottleneck
-                heapq.heappush(queue, (new_bottleneck, ni, nj))
-
-    if not np.isfinite(best[ti, tj]):
-        raise RuntimeError("No path-valid path found between the requested endpoints")
-
-    threshold = best[ti, tj]
-    allowed = support_mask & (pmf <= threshold)
-    if isinstance(gradient_alignment_weight, (bool, np.bool_)):
-        raise ValueError("gradient_alignment_weight must be finite and non-negative")
-    gradient_alignment_weight = float(gradient_alignment_weight)
-    if not np.isfinite(gradient_alignment_weight) or gradient_alignment_weight < 0:
-        raise ValueError("gradient_alignment_weight must be finite and non-negative")
-    gradient_floor = 1.0
-    if gradient_scaled is not None:
-        gradient_scaled = np.asarray(gradient_scaled, dtype=float)
-        if gradient_scaled.shape != pmf.shape + (2,):
-            raise ValueError("gradient_scaled must have shape pmf.shape + (2,)")
-        if not np.all(np.isfinite(gradient_scaled[allowed])):
-            raise ValueError("gradient_scaled must be finite in the minimax sublevel set")
-        magnitudes = np.linalg.norm(gradient_scaled[allowed], axis=1)
-        typical_gradient = float(np.median(magnitudes))
-        if typical_gradient > 0.0:
-            gradient_floor = 0.1 * typical_gradient
-    elif gradient_alignment_weight > 0.0:
-        raise ValueError("gradient_scaled is required when gradient alignment is enabled")
-
-    best_cost = np.full((nx, ny), np.inf)
-    best_cost[si, sj] = 0.0
-    previous: dict[tuple[int, int], tuple[int, int]] = {}
-    queue = [(0.0, si, sj)]
-    while queue:
-        cost, i, j = heapq.heappop(queue)
-        if cost > best_cost[i, j]:
-            continue
-        if (i, j) == (ti, tj):
-            break
-        for di, dj, distance in steps:
-            ni, nj = i + di, j + dj
-            if not (0 <= ni < nx and 0 <= nj < ny and allowed[ni, nj]):
-                continue
-            direction = np.array([di * dx_scaled, dj * dy_scaled]) / distance
-            alignment = (
-                _gradient_alignment_penalty(
-                    gradient_scaled, (i, j), (ni, nj), direction, gradient_floor
-                )
-                if gradient_scaled is not None else 0.0
-            )
-            edge_cost = distance * (
-                1.0 + gradient_alignment_weight * alignment
-            )
-            new_cost = cost + edge_cost
-            if new_cost < best_cost[ni, nj]:
-                best_cost[ni, nj] = new_cost
-                previous[(ni, nj)] = (i, j)
-                heapq.heappush(queue, (new_cost, ni, nj))
-
-    if not np.isfinite(best_cost[ti, tj]):
-        raise RuntimeError("Internal error finding a path at the minimax threshold")
-    path = [(ti, tj)]
-    while path[-1] != (si, sj):
-        path.append(previous[path[-1]])
-    return path[::-1]
 
 
 def _trapezoid_weights(coordinate: np.ndarray) -> np.ndarray:
@@ -750,6 +626,99 @@ def _posterior_mean_gradient_2d(
     return gradient
 
 
+def _fixed_reference_path_result(
+    results: dict,
+    reference: np.ndarray,
+    metric_scale: np.ndarray,
+    metric_description: str,
+    support: np.ndarray,
+    gx: np.ndarray,
+    gy: np.ndarray,
+    max_minima: int,
+    path_aligned_marginal: bool,
+    thermal_energy: float | None,
+    perpendicular_points: int,
+    perpendicular_width: float | None,
+) -> dict:
+    """Densify, validate, and evaluate an immutable reference trajectory."""
+    dx = float(gx[1] - gx[0])
+    dy = float(gy[1] - gy[0])
+    max_step = 0.5 * min(dx / metric_scale[0], dy / metric_scale[1])
+    points = resample_polyline(reference, metric_scale, max_step)
+    lower = np.array([gx[0], gy[0]])
+    upper = np.array([gx[-1], gy[-1]])
+    inside_grid = np.all((points >= lower) & (points <= upper), axis=1)
+    valid = inside_grid & _nearest_grid_support(points, gx, gy, support)
+    if not np.all(valid):
+        first = points[int(np.flatnonzero(~valid)[0])]
+        raise ValueError(
+            "The fixed reference trajectory leaves the path-valid region "
+            f"near ({first[0]:.6g}, {first[1]:.6g})"
+        )
+
+    profile = evaluate_path_profile(results, points, metric_scale)
+    components, component_count = _support_components(support)
+    start_ij = _snap(points[0], gx, gy)
+    end_ij = _snap(points[-1], gx, gy)
+    minima = find_minima(
+        results["pmf"], gx, gy, max_minima=max_minima, support_mask=support
+    )
+    path_result = {
+        **profile,
+        "minima": minima,
+        "nominal_start_xy": tuple(reference[0]),
+        "nominal_end_xy": tuple(reference[-1]),
+        "start_endpoint": {
+            "ij": start_ij,
+            "xy": profile["start_xy"],
+            "nominal_xy": tuple(reference[0]),
+            "component": int(components[start_ij]),
+            "selection": "fixed_reference_vertex",
+        },
+        "end_endpoint": {
+            "ij": end_ij,
+            "xy": profile["end_xy"],
+            "nominal_xy": tuple(reference[-1]),
+            "component": int(components[end_ij]),
+            "selection": "fixed_reference_vertex",
+        },
+        "explicit_endpoints": False,
+        "endpoints_adjusted": False,
+        "endpoint_selection": "fixed_reference_trajectory",
+        "endpoint_search_radius": None,
+        "support_component": int(components[start_ij]),
+        "support_component_count": int(component_count),
+        "path_graph_connectivity": None,
+        "path_objective": "fixed_reference_trajectory",
+        "path_gradient_alignment_weight": 0.0,
+        "path_uncertainty_weight": 0.0,
+        "path_search_bottleneck_score": None,
+        "path_median_abs_gradient_cosine": None,
+        "path_length_weighted_gradient_misalignment": None,
+        "path_mode": "fixed",
+        "reference_path": reference,
+        "corridor_radius": None,
+        "max_reference_distance": 0.0,
+        "metric_scale": metric_scale,
+        "path_coordinate_description": metric_description,
+        "cv_names": results.get("cv_names", ("cv0", "cv1")),
+        "cv_units": results.get("cv_units", ("", "")),
+        "energy_unit": results.get("energy_unit", "eV"),
+        "default_uncertainty": results["default_uncertainty"],
+    }
+    if path_aligned_marginal:
+        if thermal_energy is None:
+            raise ValueError(
+                "thermal_energy is required when path_aligned_marginal=True"
+            )
+        path_result["path_aligned_marginal"] = _path_aligned_marginal_pmf(
+            results, path_result, thermal_energy=thermal_energy,
+            perpendicular_points=perpendicular_points,
+            perpendicular_width=perpendicular_width,
+        )
+    return path_result
+
+
 def find_lowest_barrier_path(
     results: dict,
     endpoints=None,
@@ -759,6 +728,10 @@ def find_lowest_barrier_path(
     endpoint_search_radius: float | None = None,
     adjust_endpoints: bool = True,
     gradient_alignment_weight: float = 1.0,
+    uncertainty_weight: float = 0.0,
+    reference_path: np.ndarray | None = None,
+    path_mode: str = "search",
+    corridor_radius: float | None = None,
     path_aligned_marginal: bool = False,
     thermal_energy: float | None = None,
     perpendicular_points: int = 201,
@@ -780,11 +753,13 @@ def find_lowest_barrier_path(
     ``results['support_mask']``. By default path length divides each CV by
     its fitted GP lengthscale; ``metric_scale`` may override those two scales.
     ``gradient_alignment_weight`` controls the secondary MEP-like preference;
-    zero recovers the geometrically shortest minimax path.
+    zero recovers the geometrically shortest minimax path. A positive
+    ``uncertainty_weight`` searches on ``mean dF from start + weight * sigma``.
+    ``path_mode`` may be ``search``, ``corridor`` around a reference polyline,
+    or ``fixed`` to evaluate that polyline directly.
     If ``path_aligned_marginal`` is true, ``thermal_energy`` supplies kBT in
     ``results['energy_unit']``.
     """
-    from .integration_2d import posterior_covariance_2d
     gx = np.asarray(results["gx"], dtype=float)
     gy = np.asarray(results["gy"], dtype=float)
     pmf = np.asarray(results["pmf"], dtype=float)
@@ -816,6 +791,73 @@ def find_lowest_barrier_path(
         ) from exc
     if not np.all(np.isfinite(lengthscale)) or np.any(lengthscale <= 0):
         raise ValueError("results lengthscale must contain two finite positive values")
+
+    if metric_scale is None:
+        metric_scale = lengthscale.copy()
+        metric_description = "dimensionless; CVs scaled by GP lengthscales"
+    else:
+        metric_scale = np.asarray(metric_scale, dtype=float)
+        metric_description = "dimensionless; CVs scaled by user metric_scale"
+    if (
+        metric_scale.shape != (2,)
+        or not np.all(np.isfinite(metric_scale))
+        or np.any(metric_scale <= 0)
+    ):
+        raise ValueError("metric_scale must contain two finite positive CV scales")
+
+    if path_mode not in {"search", "corridor", "fixed"}:
+        raise ValueError("path_mode must be one of: search, corridor, fixed")
+    reference = (
+        None if reference_path is None else validate_reference_path(reference_path)
+    )
+    if path_mode == "search" and reference is not None:
+        raise ValueError("reference_path requires corridor or fixed path mode")
+    if path_mode != "search" and reference is None:
+        raise ValueError(f"path_mode={path_mode!r} requires reference_path")
+    if isinstance(uncertainty_weight, (bool, np.bool_)):
+        raise ValueError("uncertainty_weight must be finite and non-negative")
+    try:
+        uncertainty_weight = float(uncertainty_weight)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("uncertainty_weight must be finite and non-negative") from exc
+    if not np.isfinite(uncertainty_weight) or uncertainty_weight < 0:
+        raise ValueError("uncertainty_weight must be finite and non-negative")
+
+    reference_distance = None
+    if path_mode == "corridor":
+        if isinstance(corridor_radius, (bool, np.bool_)):
+            raise ValueError("corridor_radius must be finite and positive")
+        try:
+            corridor_radius = float(corridor_radius)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("corridor_radius must be finite and positive") from exc
+        if not np.isfinite(corridor_radius) or corridor_radius <= 0:
+            raise ValueError("corridor_radius must be finite and positive")
+        grid_x, grid_y = np.meshgrid(gx, gy, indexing="ij")
+        grid_points = np.column_stack([grid_x.ravel(), grid_y.ravel()])
+        reference_distance = distance_to_polyline(
+            grid_points, reference, metric_scale
+        ).reshape(pmf.shape)
+        support = support & (reference_distance <= corridor_radius + 1.0e-12)
+        if not np.any(support):
+            raise ValueError(
+                "The reference corridor does not overlap the path-valid region"
+            )
+        if endpoints is None:
+            endpoints = (reference[0], reference[-1])
+    elif corridor_radius is not None:
+        raise ValueError("corridor_radius is only valid with corridor path mode")
+
+    if path_mode == "fixed":
+        if endpoints is not None:
+            raise ValueError("fixed path mode uses the reference trajectory endpoints")
+        if uncertainty_weight > 0:
+            raise ValueError("uncertainty_weight cannot select among a fixed path")
+        return _fixed_reference_path_result(
+            results, reference, metric_scale, metric_description, support,
+            gx, gy, max_minima, path_aligned_marginal, thermal_energy,
+            perpendicular_points, perpendicular_width,
+        )
 
     components, component_count = _support_components(support)
     minima = find_minima(
@@ -929,19 +971,6 @@ def find_lowest_barrier_path(
     if start_ij == end_ij:
         raise ValueError("The two selected endpoints collapse to one grid point")
 
-    if metric_scale is None:
-        metric_scale = lengthscale.copy()
-        metric_description = "dimensionless; CVs scaled by GP lengthscales"
-    else:
-        metric_scale = np.asarray(metric_scale, dtype=float)
-        metric_description = "dimensionless; CVs scaled by user metric_scale"
-    if (
-        metric_scale.shape != (2,)
-        or not np.all(np.isfinite(metric_scale))
-        or np.any(metric_scale <= 0)
-    ):
-        raise ValueError("metric_scale must contain two finite positive CV scales")
-
     dx = float(gx[1] - gx[0]) if len(gx) > 1 else 1.0
     dy = float(gy[1] - gy[0]) if len(gy) > 1 else 1.0
     if isinstance(gradient_alignment_weight, (bool, np.bool_)):
@@ -953,17 +982,29 @@ def find_lowest_barrier_path(
         raise ValueError(
             "gradient_alignment_weight must be finite and non-negative"
         )
+    grid_x, grid_y = np.meshgrid(gx, gy, indexing="ij")
+    grid_points = np.column_stack([grid_x.ravel(), grid_y.ravel()])
+    if uncertainty_weight > 0.0:
+        reference_index = start_ij[0] * len(gy) + start_ij[1]
+        _, _, search_sigma = relative_uncertainty(
+            results, grid_points, results["latent_variance_raw"].ravel(),
+            reference_index,
+        )
+        search_sigma = search_sigma.reshape(pmf.shape)
+        search_score = pmf - pmf[start_ij] + uncertainty_weight * search_sigma
+    else:
+        search_sigma = np.zeros_like(pmf)
+        search_score = pmf
+
     gradient_scaled = None
     if gradient_alignment_weight > 0.0:
-        grid_x, grid_y = np.meshgrid(gx, gy, indexing="ij")
-        grid_points = np.column_stack([grid_x.ravel(), grid_y.ravel()])
         gradient_scaled = _posterior_mean_gradient_2d(
             results, grid_points
         ).reshape(pmf.shape + (2,))
         gradient_scaled = gradient_scaled * metric_scale
 
     path = _minimax_path(
-        pmf, start_ij, end_ij, dx / metric_scale[0], dy / metric_scale[1],
+        search_score, start_ij, end_ij, dx / metric_scale[0], dy / metric_scale[1],
         support, gradient_scaled=gradient_scaled,
         gradient_alignment_weight=gradient_alignment_weight,
     )
@@ -973,17 +1014,14 @@ def find_lowest_barrier_path(
     ds = np.hypot(
         np.diff(px) / metric_scale[0], np.diff(py) / metric_scale[1]
     )
-    s = np.concatenate([[0.0], np.cumsum(ds)])
     energy = pmf[pi, pj]
-    energy_relative = energy - energy[0]
-    path_minimum = int(np.argmin(energy))
-    energy_relative_to_minimum = energy - energy[path_minimum]
-    ts = int(np.argmax(energy))
 
     median_abs_gradient_cosine = None
     length_weighted_gradient_misalignment = None
     if gradient_scaled is not None:
-        threshold_mask = support & (pmf <= float(np.max(energy)))
+        threshold_mask = support & (
+            search_score <= float(np.max(search_score[pi, pj])) + 1.0e-12
+        )
         typical_gradient = float(np.median(
             np.linalg.norm(gradient_scaled[threshold_mask], axis=1)
         ))
@@ -1012,52 +1050,27 @@ def find_lowest_barrier_path(
         ))
 
     points = np.column_stack([px, py])
-    covariance_to_start = posterior_covariance_2d(
-        results, points, points[[0]], calibrated=False
-    ).ravel()
-    covariance_to_minimum = posterior_covariance_2d(
-        results, points, points[[path_minimum]], calibrated=False
-    ).ravel()
-    latent_variance = results["latent_variance_raw"][pi, pj]
-    relative_variance = np.clip(
-        latent_variance + latent_variance[0] - 2.0 * covariance_to_start,
-        0,
-        np.inf,
+    profile = evaluate_path_profile(
+        results, points, metric_scale,
+        energy=energy,
+        latent_variance=results["latent_variance_raw"][pi, pj],
     )
-    relative_variance[0] = 0.0  # F(start) - F(start) is exactly known to be zero.
-    sigma_raw = np.sqrt(relative_variance)
-    sigma_calibrated = sigma_raw * results["loo_calibration_factor"]
-    minimum_relative_variance = np.clip(
-        latent_variance + latent_variance[path_minimum]
-        - 2.0 * covariance_to_minimum,
-        0,
-        np.inf,
+    path_objective = (
+        "minimum_upper_confidence_bottleneck"
+        if uncertainty_weight > 0 else "minimum_bottleneck"
     )
-    minimum_relative_variance[path_minimum] = 0.0
-    sigma_from_minimum_raw = np.sqrt(minimum_relative_variance)
-    sigma_from_minimum_calibrated = (
-        sigma_from_minimum_raw * results["loo_calibration_factor"]
+    path_objective += (
+        "_then_gradient_aligned_metric_cost"
+        if gradient_alignment_weight > 0
+        else "_then_shortest_metric_length"
     )
-    use_calibrated = results["default_uncertainty"] == "calibrated"
-    sigma_default = sigma_calibrated if use_calibrated else sigma_raw
-    sigma_from_minimum_default = (
-        sigma_from_minimum_calibrated
-        if use_calibrated else sigma_from_minimum_raw
+    max_reference_distance = (
+        float(np.max(reference_distance[pi, pj]))
+        if reference_distance is not None else None
     )
 
     path_result = {
-        "s": s,
-        "x": px,
-        "y": py,
-        "pmf": energy,
-        "pmf_rel": energy_relative,
-        "pmf_rel_path_min": energy_relative_to_minimum,
-        "sigma_raw": sigma_raw,
-        "sigma_calibrated": sigma_calibrated,
-        "sigma": sigma_default,
-        "sigma_from_path_min_raw": sigma_from_minimum_raw,
-        "sigma_from_path_min_calibrated": sigma_from_minimum_calibrated,
-        "sigma_from_path_min": sigma_from_minimum_default,
+        **profile,
         "minima": minima,
         "nominal_start_xy": tuple(start_endpoint["nominal_xy"]),
         "nominal_end_xy": tuple(end_endpoint["nominal_xy"]),
@@ -1076,39 +1089,20 @@ def find_lowest_barrier_path(
         ),
         "support_component": int(start_endpoint["component"]),
         "support_component_count": int(component_count),
-        "start_xy": (float(px[0]), float(py[0])),
-        "end_xy": (float(px[-1]), float(py[-1])),
-        "ts_xy": (float(px[ts]), float(py[ts])),
-        "ts_s": float(s[ts]),
-        "path_min_index": path_minimum,
-        "path_min_xy": (
-            float(px[path_minimum]), float(py[path_minimum])
-        ),
-        "path_min_s": float(s[path_minimum]),
-        "path_min_pmf": float(energy[path_minimum]),
-        "bottleneck_energy": float(np.max(energy)),
-        "path_metric_length": float(s[-1]),
         "path_graph_connectivity": 8,
-        "path_objective": (
-            "minimum_bottleneck_then_gradient_aligned_metric_cost"
-            if gradient_alignment_weight > 0.0
-            else "minimum_bottleneck_then_shortest_metric_length"
-        ),
+        "path_objective": path_objective,
         "path_gradient_alignment_weight": gradient_alignment_weight,
+        "path_uncertainty_weight": uncertainty_weight,
+        "path_search_bottleneck_score": float(np.max(search_score[pi, pj])),
+        "path_search_sigma_from_start": search_sigma[pi, pj],
+        "path_mode": path_mode,
+        "reference_path": reference,
+        "corridor_radius": corridor_radius,
+        "max_reference_distance": max_reference_distance,
         "path_median_abs_gradient_cosine": median_abs_gradient_cosine,
         "path_length_weighted_gradient_misalignment": (
             length_weighted_gradient_misalignment
         ),
-        "barrier": float(energy_relative_to_minimum[ts]),
-        "barrier_err_raw": float(sigma_from_minimum_raw[ts]),
-        "barrier_err_calibrated": float(
-            sigma_from_minimum_calibrated[ts]
-        ),
-        "barrier_err": float(sigma_from_minimum_default[ts]),
-        "delta_f": float(energy_relative[-1]),
-        "delta_f_err_raw": float(sigma_raw[-1]),
-        "delta_f_err_calibrated": float(sigma_calibrated[-1]),
-        "delta_f_err": float(sigma_default[-1]),
         "metric_scale": metric_scale,
         "path_coordinate_description": metric_description,
         "cv_names": results.get("cv_names", ("cv0", "cv1")),
@@ -1170,13 +1164,24 @@ def save_lowest_barrier_path(path_result: dict, path: str) -> None:
             "length-weighted misalignment = "
             f"{path_result['path_length_weighted_gradient_misalignment']:.4f}\n"
         )
+    mode_note = f"path mode = {path_result.get('path_mode', 'search')}\n"
+    if path_result.get("corridor_radius") is not None:
+        mode_note += (
+            "reference corridor radius = "
+            f"{path_result['corridor_radius']:.6g} path-metric units; "
+            "maximum selected-path distance = "
+            f"{path_result['max_reference_distance']:.6g}\n"
+        )
     header = (
-        "Lowest-barrier (minimum-bottleneck) grid path\n"
+        "Path on a two-dimensional GPR PMF\n"
+        f"{mode_note}"
         f"path metric scales = ({metric[0]:.6g} {cvu[0]}, "
         f"{metric[1]:.6g} {cvu[1]})\n"
         f"path objective = {path_result['path_objective']}; "
         f"gradient weight = "
-        f"{path_result.get('path_gradient_alignment_weight', 0.0):.6g}\n"
+        f"{path_result.get('path_gradient_alignment_weight', 0.0):.6g}; "
+        f"uncertainty weight = "
+        f"{path_result.get('path_uncertainty_weight', 0.0):.6g}\n"
         f"{alignment_note}"
         f"{endpoint_note}"
         f"start = ({sx:.4f} {cvu[0]}, {sy:.4f} {cvu[1]})\n"

@@ -539,6 +539,10 @@ def reconstruct_pmf_2d(
     path_endpoint_radius: float | None = None,
     adjust_path_endpoints: bool = True,
     path_gradient_weight: float = 1.0,
+    path_uncertainty_weight: float = 0.0,
+    path_reference: np.ndarray | None = None,
+    path_mode: str = "search",
+    path_corridor_radius: float | None = None,
     path_aligned_marginal: bool = False,
     thermal_energy: float | None = None,
     perpendicular_points: int = 201,
@@ -566,6 +570,10 @@ def reconstruct_pmf_2d(
     ``adjust_path_endpoints=False`` to use the nearest restraint-window centres
     instead. ``path_gradient_weight`` controls the MEP-like gradient-alignment
     preference among exact minimum-barrier paths; zero selects the shortest.
+    ``path_uncertainty_weight`` searches a one-sided upper-confidence surface.
+    ``path_mode`` selects free search, a corridor around ``path_reference``, or
+    direct evaluation of that fixed trajectory; corridor radii use the scaled
+    path metric.
     """
     if (colvar_dir is None) == (data is None):
         raise ValueError("Provide exactly one of colvar_dir or data.")
@@ -894,6 +902,10 @@ def reconstruct_pmf_2d(
             endpoint_search_radius=path_endpoint_radius,
             adjust_endpoints=adjust_path_endpoints,
             gradient_alignment_weight=path_gradient_weight,
+            uncertainty_weight=path_uncertainty_weight,
+            reference_path=path_reference,
+            path_mode=path_mode,
+            corridor_radius=path_corridor_radius,
             path_aligned_marginal=path_aligned_marginal,
             thermal_energy=thermal_energy,
             perpendicular_points=perpendicular_points,

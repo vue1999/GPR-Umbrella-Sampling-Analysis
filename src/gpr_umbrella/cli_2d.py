@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import argparse
 
+import numpy as np
+
 from .integration_2d import reconstruct_pmf_2d
 
 
@@ -78,6 +80,23 @@ def build_parser() -> argparse.ArgumentParser:
         help="Gradient-alignment weight among exact minimum-barrier paths; "
              "zero gives the geometric shortest path (default: 1.0)",
     )
+    p.add_argument(
+        "--path-uncertainty-weight", type=float, default=0.0, metavar="BETA",
+        help="Search on mean dF from start + BETA times its posterior sigma "
+             "(default: 0, mean-only minimax)",
+    )
+    p.add_argument(
+        "--path-mode", choices=("search", "corridor", "fixed"), default="search",
+        help="Free grid search, corridor search, or direct reference-path evaluation",
+    )
+    p.add_argument(
+        "--path-reference", default=None, metavar="FILE",
+        help="Text file whose first two columns define the reference trajectory",
+    )
+    p.add_argument(
+        "--path-corridor-radius", type=float, default=None, metavar="RADIUS",
+        help="Corridor radius in dimensionless path-metric units",
+    )
     p.add_argument("--path-metric-scales", type=float, nargs=2, default=None,
                    metavar=("SCALE0", "SCALE1"),
                    help="Positive scale for each CV when defining path length and "
@@ -101,6 +120,28 @@ def main(argv=None) -> int:
     args = parser.parse_args(argv)
     if args.path_aligned_marginal and args.thermal_energy is None:
         parser.error("--path-aligned-marginal requires --thermal-energy KBT")
+    if args.path_mode != "search" and args.path_reference is None:
+        parser.error("--path-mode corridor/fixed requires --path-reference FILE")
+    if args.path_mode == "corridor" and args.path_corridor_radius is None:
+        parser.error("--path-mode corridor requires --path-corridor-radius")
+    if args.path_mode == "search" and args.path_reference is not None:
+        parser.error("--path-reference requires --path-mode corridor or fixed")
+    if args.path_mode != "corridor" and args.path_corridor_radius is not None:
+        parser.error("--path-corridor-radius requires --path-mode corridor")
+    if args.path_mode == "fixed" and args.path_endpoints is not None:
+        parser.error("--path-mode fixed uses the reference trajectory endpoints")
+    if args.path_uncertainty_weight < 0:
+        parser.error("--path-uncertainty-weight must be non-negative")
+    if args.path_mode == "fixed" and args.path_uncertainty_weight > 0:
+        parser.error("a fixed trajectory cannot be selected by uncertainty")
+    reference_path = None
+    if args.path_reference is not None:
+        try:
+            reference_path = np.loadtxt(
+                args.path_reference, comments="#", usecols=(0, 1), ndmin=2,
+            )
+        except (OSError, ValueError) as exc:
+            parser.error(f"cannot read --path-reference: {exc}")
     reconstruct_pmf_2d(
         colvar_dir=args.colvar_dir,
         kappa_dir=args.kappa_dir,
@@ -128,6 +169,10 @@ def main(argv=None) -> int:
         path_endpoint_radius=args.path_endpoint_radius,
         adjust_path_endpoints=args.adjust_path_endpoints,
         path_gradient_weight=args.path_gradient_weight,
+        path_uncertainty_weight=args.path_uncertainty_weight,
+        path_reference=reference_path,
+        path_mode=args.path_mode,
+        path_corridor_radius=args.path_corridor_radius,
         path_metric_scale=(tuple(args.path_metric_scales)
                            if args.path_metric_scales else None),
         path_aligned_marginal=args.path_aligned_marginal,

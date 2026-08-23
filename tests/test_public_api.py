@@ -5,6 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 import re
 
+import numpy as np
 import pytest
 
 import gpr_umbrella
@@ -87,6 +88,10 @@ def test_2d_path_options_are_exposed_and_find_mep_is_retired() -> None:
         "--path-endpoint-radius",
         "--adjust-path-endpoints",
         "--path-gradient-weight",
+        "--path-uncertainty-weight",
+        "--path-mode",
+        "--path-reference",
+        "--path-corridor-radius",
     } <= option_strings
     assert "--find-mep" not in option_strings
 
@@ -103,6 +108,10 @@ def test_2d_path_options_are_exposed_and_find_mep_is_retired() -> None:
     assert parsed.support_radius == pytest.approx(0.5)
     assert parsed.adjust_path_endpoints is True
     assert parsed.path_gradient_weight == pytest.approx(1.0)
+    assert parsed.path_uncertainty_weight == pytest.approx(0.0)
+    assert parsed.path_mode == "search"
+    assert parsed.path_reference is None
+    assert parsed.path_corridor_radius is None
 
     restricted = parser.parse_args([
         "--colvar-dir", "unused",
@@ -110,9 +119,17 @@ def test_2d_path_options_are_exposed_and_find_mep_is_retired() -> None:
         "--support-radius", "2.25",
         "--path-endpoint-radius", "0.75",
         "--path-gradient-weight", "2.5",
+        "--path-uncertainty-weight", "1.5",
+        "--path-mode", "corridor",
+        "--path-reference", "neb.dat",
+        "--path-corridor-radius", "0.25",
         "--no-adjust-path-endpoints",
     ])
     assert restricted.restrict_to_sampled_support is True
+    assert restricted.path_uncertainty_weight == pytest.approx(1.5)
+    assert restricted.path_mode == "corridor"
+    assert restricted.path_reference == "neb.dat"
+    assert restricted.path_corridor_radius == pytest.approx(0.25)
     assert restricted.support_radius == pytest.approx(2.25)
     assert restricted.path_endpoint_radius == pytest.approx(0.75)
     assert restricted.adjust_path_endpoints is False
@@ -148,3 +165,24 @@ def test_2d_cli_forwards_sampled_support_options(monkeypatch) -> None:
     assert calls[0]["path_endpoint_radius"] == pytest.approx(0.75)
     assert calls[0]["adjust_path_endpoints"] is False
     assert calls[0]["path_gradient_weight"] == pytest.approx(2.5)
+
+
+def test_2d_cli_loads_reference_trajectory(tmp_path, monkeypatch):
+    reference_file = tmp_path / "neb.dat"
+    reference_file.write_text("# HH RELZ\n0.0 1.0\n2.0 3.0\n")
+    captured = {}
+
+    def fake_reconstruct(**kwargs):
+        captured.update(kwargs)
+        return {}
+
+    monkeypatch.setattr(cli_2d, "reconstruct_pmf_2d", fake_reconstruct)
+    assert cli_2d.main([
+        "--colvar-dir", "unused",
+        "--find-lowest-barrier-path",
+        "--path-mode", "fixed",
+        "--path-reference", str(reference_file),
+    ]) == 0
+    np.testing.assert_allclose(captured["path_reference"], [[0.0, 1.0], [2.0, 3.0]])
+    assert captured["path_mode"] == "fixed"
+    assert captured["path_corridor_radius"] is None

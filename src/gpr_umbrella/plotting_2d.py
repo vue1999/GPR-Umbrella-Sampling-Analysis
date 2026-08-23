@@ -478,8 +478,18 @@ def plot_lowest_barrier_path(results: dict, path_result: dict,
         cf, ax=ax,
         label=f"PMF − sampled-window minimum ({eu}); red = outside display range",
     )
+    mode = path_result.get("path_mode", "search")
+    path_label = "lowest-barrier path" if mode == "search" else "selected path"
     ax.plot(path_result["x"], path_result["y"], color="black", linestyle="--",
-            linewidth=1.4, dash_capstyle="round", zorder=5, label="lowest-barrier path")
+            linewidth=1.4, dash_capstyle="round", zorder=5, label=path_label)
+    reference = path_result.get("reference_path")
+    if reference is not None:
+        reference = np.asarray(reference)
+        ax.plot(
+            reference[:, 0], reference[:, 1], color=PALETTE["guide"],
+            linestyle=":", linewidth=1.5, zorder=4,
+            label="reference trajectory",
+        )
     if path_result.get("explicit_endpoints", False):
         nominal = np.asarray([
             path_result["nominal_start_xy"], path_result["nominal_end_xy"]
@@ -506,7 +516,10 @@ def plot_lowest_barrier_path(results: dict, path_result: dict,
                edgecolors="k", s=65, zorder=7, label="path minimum")
     ax.set_xlabel(f"{cvn[0]} ({cvu[0]})")
     ax.set_ylabel(f"{cvn[1]} ({cvu[1]})")
-    ax.set_title("Lowest-barrier grid path")
+    ax.set_title(
+        "Lowest-barrier grid path" if mode == "search"
+        else f"Selected path ({mode})"
+    )
     ax.legend(loc="best")
     _annotate(ax, f"TS candidate: {path_result['ts_xy'][0]:.2g} {cvu[0]}, "
                   f"{path_result['ts_xy'][1]:.2g} {cvu[1]}   ·   "
@@ -571,8 +584,13 @@ def plot_lowest_barrier_path(results: dict, path_result: dict,
         f"ℓ_GP = ({ell[0]:.3g} {cvu[0]}, {ell[-1]:.3g} {cvu[1]})  ·  "
         f"path metric = ({metric[0]:.3g} {cvu[0]}, "
         f"{metric[-1]:.3g} {cvu[1]})  ·  "
-        f"minimax path over the GP surface"
+        f"path mode = {path_result.get('path_mode', 'search')}"
     )
+    if path_result.get("path_uncertainty_weight", 0.0) > 0:
+        setup += (
+            "  ·  UCB weight = "
+            f"{path_result['path_uncertainty_weight']:.3g}σ"
+        )
     fig.text(0.5, 0.965, title, ha="center", va="top",
              fontsize=13, fontweight="bold")
     fig.text(0.5, 0.925, setup, ha="center", va="top",
