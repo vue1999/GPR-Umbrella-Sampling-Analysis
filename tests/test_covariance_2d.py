@@ -243,6 +243,10 @@ def test_reconstruction_uses_sampled_neighborhoods_by_default() -> None:
     np.testing.assert_allclose(results["support_ellipse_semiaxes"], (0.4, 0.55))
     assert np.any(results["support_mask"])
     assert np.any(~results["support_mask"])
+    assert np.all(results["path_valid_mask"] <= results["support_mask"])
+    assert results["path_valid_kind"] == (
+        "sampled_support_and_window_anchored_pmf_range"
+    )
     reference = results["_gp_state"]["pmf_reference_index"]
     assert results["support_mask"].ravel()[reference]
     assert results["pmf"].ravel()[reference] == pytest.approx(0.0, abs=1e-14)
@@ -431,7 +435,7 @@ def test_posterior_covariance_and_reference_state_drive_pmf_uncertainty() -> Non
     # to F(reference) - F(reference), which is known exactly.
     diagonal_only_at_reference = np.sqrt(2.0 * covariance[reference, reference])
     assert diagonal_only_at_reference > 0.0
-    assert results["pmf_std_raw"].ravel()[reference] < 1e-8
+    assert results["pmf_std_raw"].ravel()[reference] == 0.0
 
     scaled_results = dict(results)
     scaled_results["loo_calibration_factor"] = 2.5

@@ -14,7 +14,10 @@ def _values_at_window_means(results: dict, field: np.ndarray) -> np.ndarray:
         (results["gx"], results["gy"]), np.asarray(field, dtype=float),
         bounds_error=False, fill_value=np.nan,
     )
-    values = np.asarray(interpolator(results["means"]), dtype=float)
+    points = np.asarray(results["means"], dtype=float).copy()
+    points[:, 0] = np.clip(points[:, 0], results["gx"][0], results["gx"][-1])
+    points[:, 1] = np.clip(points[:, 1], results["gy"][0], results["gy"][-1])
+    values = np.asarray(interpolator(points), dtype=float)
     values = values[np.isfinite(values)]
     if values.size == 0:
         raise ValueError("No finite grid values at the sampled window means")
@@ -27,10 +30,11 @@ def _window_anchored_display_policy(results: dict) -> dict:
     The GP is constrained by mean-force observations at the sampled window
     means, whereas large excursions near the edge of sampled support are much
     more extrapolative. The normal PMF colour range therefore contains the
-    complete min--max range at the window means, with a 10--25% margin. The
+    complete min--max range at the window means, with a 25% margin. The
     uncertainty panels similarly contain every uncertainty evaluated at a
     window mean. Values beyond these limits are retained and drawn with the
-    warning colour; this policy changes only the visualization.
+    warning colour. Reconstruction also intersects this normal PMF range with
+    geometric sampling support to define endpoint and path validity.
     """
     pmf_at_means = _values_at_window_means(results, results["pmf"])
     reference = float(np.min(pmf_at_means))
@@ -41,8 +45,7 @@ def _window_anchored_display_policy(results: dict) -> dict:
     )
     typical_sigma = float(np.median(calibrated_at_means))
     if span > 1e-12:
-        # Uncertainty can widen the padding, but never dominate the PMF scale.
-        padding = max(0.10 * span, min(2.0 * typical_sigma, 0.25 * span))
+        padding = 0.25 * span
     else:
         padding = max(2.0 * typical_sigma, 1e-9)
 

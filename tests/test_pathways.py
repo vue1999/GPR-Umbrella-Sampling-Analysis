@@ -400,6 +400,27 @@ def test_requested_endpoints_move_to_deepest_supported_local_minima():
     assert all(results["support_mask"][index] for index in path_indices)
 
 
+def test_path_avoids_cells_excluded_by_the_path_valid_mask():
+    results = _analytic_results()
+    middle = int(np.argmin(np.abs(results["gy"])))
+    blocked = (len(results["gx"]) // 2, middle)
+    results["path_valid_mask"] = results["support_mask"].copy()
+    results["path_valid_mask"][blocked] = False
+
+    path = find_lowest_barrier_path(
+        results,
+        endpoints=((-1.0, 0.0), (1.0, 0.0)),
+        adjust_endpoints=False,
+    )
+    path_indices = [
+        (int(np.argmin(np.abs(results["gx"] - x))),
+         int(np.argmin(np.abs(results["gy"] - y))))
+        for x, y in zip(path["x"], path["y"])
+    ]
+    assert blocked not in path_indices
+    assert all(results["path_valid_mask"][index] for index in path_indices)
+
+
 def test_disconnected_endpoint_neighborhoods_fail_with_actionable_error():
     results = _analytic_results()
     results["lengthscale"] = np.ones(2)
@@ -408,7 +429,7 @@ def test_disconnected_endpoint_neighborhoods_fail_with_actionable_error():
     support[7:, :] = True
     results["support_mask"] = support
 
-    with pytest.raises(ValueError, match="same connected sampled-support"):
+    with pytest.raises(ValueError, match="same connected path-valid"):
         find_lowest_barrier_path(
             results,
             endpoints=((-1.0, 0.0), (1.0, 0.0)),

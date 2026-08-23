@@ -158,8 +158,8 @@ from gpr_umbrella import reconstruct_pmf_2d
 res = reconstruct_pmf_2d(colvar_dir="COLVAR", kappa_dir="COLVAR")
 ```
 
-Outputs: `*_pmf_2d.dat` (cv0, cv1, PMF, raw sigma, calibrated sigma, and a
-sampling-support flag on a grid),
+Outputs: `*_pmf_2d.dat` (cv0, cv1, PMF, raw sigma, calibrated sigma,
+sampling-support flag, and path-valid flag on a grid),
 `*_pmf_2d.png` (PMF contour + uncertainty, window centres overlaid) and
 `*_diagnostics_2d.png` — an 8-panel sampling/fit diagnostics figure (PMF and
 calibrated uncertainty; window drift centre→mean, mean-force field, and
@@ -170,25 +170,25 @@ and the LOO calibration histogram). Pass `plot_diagnostics=False`
 The 2D colour scale is anchored to the observation locations rather than to
 the most extreme grid cell. The plotted PMF is referenced to its minimum at a
 sampled window mean, and the normal colour range contains the full min--max
-range evaluated at all sampled means plus a 10--25% margin. The margin includes
-local calibrated uncertainty but is capped so that uncertainty cannot flatten
-the PMF contrast. Raw and calibrated uncertainty panels similarly include all
-values at window means plus 25%. Supported cells outside these display ranges
-are retained but colored red; cells outside sampled support remain blank. This
-is only a plotting rule: saved PMF values, path selection, and barriers are
-unchanged. A logarithmic PMF scale is deliberately avoided because free-energy
-differences and barriers are additive quantities and a log transform would
-distort them.
+range evaluated at all sampled means plus a 25% margin. Raw and calibrated
+uncertainty panels similarly include all values at window means plus 25%.
+Supported cells outside these display ranges are retained but colored red;
+cells outside sampled support remain blank. The intersection of sampled
+support and this non-red PMF range is the path-valid mask used for endpoint
+relocation, the complete minimax path, and transverse integration. A
+logarithmic PMF scale is deliberately avoided because free-energy differences
+and barriers are additive quantities and a log transform would distort them.
 
-By default, the PMF reference, plots, path search, and transverse integration
-are restricted to the union of kernel-scaled neighborhoods around the sampled
-window means. `support_radius=0.5` (CLI: `--support-radius 0.5`) gives each
-neighborhood a radius of half the fitted or fixed GP lengthscale: a circle for
-isotropic kernel and an axis-aligned ellipse with semiaxes
-`support_radius * lengthscale` for an anisotropic kernel. This local definition
-does not fill a convex hull or bridge unsampled gaps. Use
+By default, plots are restricted to the union of kernel-scaled neighborhoods
+around the sampled window means, while endpoint/path operations use its
+intersection with the non-red PMF range. `support_radius=0.5` (CLI:
+`--support-radius 0.5`) gives each neighborhood a radius of half the fitted or
+fixed GP lengthscale: a circle for an isotropic kernel and an axis-aligned
+ellipse with semiaxes `support_radius * lengthscale` for an anisotropic kernel.
+This local definition does not fill a convex hull or bridge unsampled gaps. Use
 `restrict_to_sampled_support=False` (CLI:
-`--no-restrict-to-sampled-support`) for the full rectangular grid.
+`--no-restrict-to-sampled-support`) for a full rectangular geometric support;
+the non-red PMF path constraint still applies.
 
 Run the self-contained synthetic check (no simulation data needed):
 
@@ -217,9 +217,10 @@ lengthscale metric as sampled support and defaults to `support_radius`; set
 `endpoint_search_radius` (CLI: `--path-endpoint-radius`) independently when
 needed, or disable relocation with `adjust_endpoints=False` (CLI:
 `--no-adjust-path-endpoints`). Both relocated endpoints must belong to the same
-connected sampled-support component. The complete minimum-bottleneck path may
-move anywhere in that component; disconnected endpoint neighborhoods produce
-an actionable error instead of silently crossing an unsampled gap.
+connected path-valid component (sampled support intersected with the non-red,
+window-anchored PMF range). The complete minimum-bottleneck path may move
+anywhere in that component; disconnected endpoint neighborhoods produce an
+actionable error instead of silently crossing an invalid region.
 
 The 2D CLI can find that path and optionally compute the path-aligned marginal
 PMF, `A(s)`, by Boltzmann-integrating the transverse coordinate `u` at each

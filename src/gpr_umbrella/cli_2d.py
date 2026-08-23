@@ -62,13 +62,14 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument(
         "--path-endpoint-radius", type=float, default=None,
         help="Search radius for relocating each requested endpoint to a "
-             "supported minimum, in GP lengthscales (default: support radius)",
+             "path-valid minimum, in GP lengthscales "
+             "(default: support radius)",
     )
     p.add_argument(
         "--adjust-path-endpoints",
         action=argparse.BooleanOptionalAction,
         default=True,
-        help="Relocate requested endpoints to nearby supported minima "
+        help="Relocate requested endpoints to nearby path-valid minima "
              "(default: enabled)",
     )
     p.add_argument("--path-metric-scales", type=float, nargs=2, default=None,

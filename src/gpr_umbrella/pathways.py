@@ -153,8 +153,8 @@ def _adjust_endpoint_pair(
         start_components = sorted(item["component"] for item in start_candidates)
         end_components = sorted(item["component"] for item in end_candidates)
         raise ValueError(
-            "Endpoint neighborhoods do not reach the same connected sampled-"
-            "support component; increase support_radius or endpoint_search_radius. "
+            "Endpoint neighborhoods do not reach the same connected path-valid "
+            "component; adjust the validity range or endpoint search radius. "
             f"start components={start_components}, end components={end_components}"
         )
     return min(
@@ -215,7 +215,7 @@ def _minimax_path(
     si, sj = start_ij
     ti, tj = end_ij
     if not support_mask[si, sj] or not support_mask[ti, tj]:
-        raise ValueError("Both pathway endpoints must lie in the sampled support region")
+        raise ValueError("Both pathway endpoints must lie in the path-valid region")
     best[si, sj] = pmf[si, sj]
     best_len[si, sj] = 0.0
     queue = [(pmf[si, sj], 0.0, si, sj)]
@@ -239,7 +239,7 @@ def _minimax_path(
                 heapq.heappush(queue, (new_bottleneck, new_length, ni, nj))
 
     if not np.isfinite(best[ti, tj]):
-        raise RuntimeError("No supported path found between the requested endpoints")
+        raise RuntimeError("No path-valid path found between the requested endpoints")
     path = [(ti, tj)]
     while path[-1] != (si, sj):
         path.append(previous[path[-1]])
@@ -459,7 +459,10 @@ def _path_aligned_marginal_pmf(
     gx = np.asarray(results["gx"], dtype=float)
     gy = np.asarray(results["gy"], dtype=float)
     support = np.asarray(
-        results.get("support_mask", np.ones_like(results["pmf"])), dtype=bool
+        results.get(
+            "path_valid_mask",
+            results.get("support_mask", np.ones_like(results["pmf"])),
+        ), dtype=bool,
     )
     lower = np.array([gx.min(), gy.min()]) / metric_scale
     upper = np.array([gx.max(), gy.max()]) / metric_scale
@@ -638,14 +641,15 @@ def find_lowest_barrier_path(
     perpendicular_points: int = 201,
     perpendicular_width: float | None = None,
 ) -> dict:
-    """Find a minimum-bottleneck path inside one sampled-support component.
+    """Find a minimum-bottleneck path inside one path-valid component.
 
     Grid length is only a tie-break between paths with the same bottleneck.
-    Explicit endpoints are moved to the lowest nearby supported minima by
+    Explicit endpoints are moved to the lowest nearby path-valid minima by
     default. ``endpoint_search_radius`` is measured in GP-lengthscale units;
     when omitted it uses the reconstruction's sampled-support radius. Endpoint
     selection and the complete path are restricted to one connected component
-    of ``results['support_mask']``. By default path length divides each CV by
+    of ``results['path_valid_mask']`` when present, otherwise
+    ``results['support_mask']``. By default path length divides each CV by
     its fitted GP lengthscale; ``metric_scale`` may override those two scales.
     If ``path_aligned_marginal`` is true, ``thermal_energy`` supplies kBT in
     ``results['energy_unit']``.
@@ -654,14 +658,21 @@ def find_lowest_barrier_path(
     gx = np.asarray(results["gx"], dtype=float)
     gy = np.asarray(results["gy"], dtype=float)
     pmf = np.asarray(results["pmf"], dtype=float)
-    support = np.asarray(
+    geometric_support = np.asarray(
         results.get("support_mask", np.ones_like(pmf)), dtype=bool
     )
-    if pmf.shape != (len(gx), len(gy)) or support.shape != pmf.shape:
-        raise ValueError("PMF and support mask must match the gx/gy grid")
-    support = support & np.isfinite(pmf)
+    support = np.asarray(
+        results.get("path_valid_mask", geometric_support), dtype=bool
+    )
+    if (
+        pmf.shape != (len(gx), len(gy))
+        or geometric_support.shape != pmf.shape
+        or support.shape != pmf.shape
+    ):
+        raise ValueError("PMF and validity masks must match the gx/gy grid")
+    support = support & geometric_support & np.isfinite(pmf)
     if not np.any(support):
-        raise ValueError("The sampled-support region contains no finite PMF point")
+        raise ValueError("The path-valid region contains no finite PMF point")
     if not isinstance(adjust_endpoints, (bool, np.bool_)):
         raise ValueError("adjust_endpoints must be Boolean")
 
@@ -726,7 +737,7 @@ def find_lowest_barrier_path(
             )
             if start_endpoint["component"] != end_endpoint["component"]:
                 raise ValueError(
-                    "Requested endpoints lie in disconnected sampled-support "
+                    "Requested endpoints lie in disconnected path-valid "
                     "components; increase support_radius or adjust the endpoints"
                 )
     else:
@@ -738,7 +749,7 @@ def find_lowest_barrier_path(
         ]
         if not pairs:
             raise ValueError(
-                "No connected sampled-support component contains two detected "
+                "No connected path-valid component contains two detected "
                 f"minima (components={component_count}, minima={len(minima)}); "
                 "pass endpoints explicitly or increase support_radius"
             )

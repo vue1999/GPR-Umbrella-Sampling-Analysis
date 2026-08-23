@@ -761,6 +761,9 @@ def reconstruct_pmf_2d(
         prior_cov_ref = _se(Xs[sl], Xs[[ref]], sigma_f, ell).ravel()
         posterior_cov_ref[sl] = prior_cov_ref - K_chunk @ solved_ref
     var_diff = f_var + f_var[ref] - 2.0 * posterior_cov_ref
+    # F(x_ref) - F(x_ref) is exactly zero. Enforce that identity before the
+    # square root instead of exposing platform-dependent cancellation noise.
+    var_diff[ref] = 0.0
     pmf_std_raw = np.sqrt(np.clip(var_diff, 0, np.inf))
 
     # Leave one complete window (both correlated CV observations) out at a
@@ -820,6 +823,22 @@ def reconstruct_pmf_2d(
         },
     }
 
+    # Path validity is the intersection of geometric sampling support and the
+    # non-red, observation-anchored PMF range used by the surface plots.
+    from .plotting_2d import _window_anchored_display_policy
+    display_policy = _window_anchored_display_policy(results)
+    display_lower, display_upper = display_policy["pmf_limits"]
+    tolerance = 1e-12 * max(1.0, abs(display_lower), abs(display_upper))
+    path_valid_mask = (
+        results["support_mask"]
+        & (display_policy["pmf"] >= display_lower - tolerance)
+        & (display_policy["pmf"] <= display_upper + tolerance)
+    )
+    results["path_valid_mask"] = path_valid_mask
+    results["path_valid_kind"] = (
+        "sampled_support_and_window_anchored_pmf_range"
+    )
+
     if output_prefix is None:
         output_prefix = (os.path.basename(base_dir) if base_dir not in (None, ".")
                          else "gpr_2d")
@@ -829,12 +848,14 @@ def reconstruct_pmf_2d(
     if save_outputs:
         flat = np.column_stack([GX.ravel(), GY.ravel(),
                                 pmf.ravel(), pmf_std_raw,
-                                pmf_std_calibrated, support_mask.astype(int)])
+                                pmf_std_calibrated, support_mask.astype(int),
+                                path_valid_mask.ravel().astype(int)])
         pmf_path = os.path.join(out, f"{output_prefix}_pmf_2d.dat")
         np.savetxt(pmf_path, flat,
                    header=f"{cv_names[0]}({cv_units[0]}) {cv_names[1]}({cv_units[1]}) "
                           f"PMF({energy_unit}) sigma_raw({energy_unit}) "
-                          f"sigma_calibrated({energy_unit}) supported", fmt="%.6f")
+                          f"sigma_calibrated({energy_unit}) supported path_valid",
+                   fmt="%.6f")
         results["pmf_path"] = pmf_path
         if verbose:
             print(f"wrote {pmf_path}")
