@@ -478,7 +478,7 @@ def plot_lowest_barrier_path(results: dict, path_result: dict,
     )
     ax.plot(path_result["x"], path_result["y"], color="black", linestyle="--",
             linewidth=1.4, dash_capstyle="round", zorder=5, label="lowest-barrier path")
-    if path_result.get("endpoints_adjusted", False):
+    if path_result.get("explicit_endpoints", False):
         nominal = np.asarray([
             path_result["nominal_start_xy"], path_result["nominal_end_xy"]
         ])

@@ -69,7 +69,8 @@ def build_parser() -> argparse.ArgumentParser:
         "--adjust-path-endpoints",
         action=argparse.BooleanOptionalAction,
         default=True,
-        help="Relocate requested endpoints to nearby path-valid minima "
+        help="Relocate requested endpoints to nearby path-valid minima; "
+             "disable to use the nearest restraint-window centres "
              "(default: enabled)",
     )
     p.add_argument("--path-metric-scales", type=float, nargs=2, default=None,

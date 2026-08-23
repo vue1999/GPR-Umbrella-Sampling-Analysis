@@ -199,8 +199,13 @@ python examples/run_synthetic_2d_demo.py   # reconstructs a known 2D PMF
 ### Lowest-barrier paths and path-aligned marginal PMFs
 
 `find_lowest_barrier_path` finds the grid path whose highest PMF is
-as low as possible. It is a minimum-bottleneck path rather than a string- or
-NEB-refined minimum-energy path:
+as low as possible. It first computes the exact minimax PMF threshold, then
+finds the shortest lengthscale-scaled path within the path-valid cells at or
+below that threshold. This guarantees the global minimum barrier, followed by
+the globally shortest tie-break, on the finite 8-neighbor grid graph. It is not
+a guarantee for the underlying continuous GPR surface between grid points, and
+it is a minimum-bottleneck path rather than a string- or NEB-refined
+minimum-energy path:
 
 ```python
 from gpr_umbrella import find_lowest_barrier_path
@@ -215,8 +220,13 @@ Requested endpoints are relocated to the deepest grid-local minima within an
 elliptical neighborhood by default. The endpoint search uses the same
 lengthscale metric as sampled support and defaults to `support_radius`; set
 `endpoint_search_radius` (CLI: `--path-endpoint-radius`) independently when
-needed, or disable relocation with `adjust_endpoints=False` (CLI:
-`--no-adjust-path-endpoints`). Both relocated endpoints must belong to the same
+needed. Set `adjust_endpoints=False` (CLI:
+`--no-adjust-path-endpoints`) to skip the minimum search and instead use the
+restraint-window centre nearest each requested endpoint, snapped to the path
+grid. A selected window centre must snap into the path-valid region; otherwise
+the code stops with an actionable error rather than silently moving it. The
+window-centre mode requires explicit endpoints so the corresponding endpoint
+windows can be identified. Both selected endpoints must belong to the same
 connected path-valid component (sampled support intersected with the non-red,
 window-anchored PMF range). The complete minimum-bottleneck path may move
 anywhere in that component; disconnected endpoint neighborhoods produce an

@@ -4,6 +4,8 @@ from __future__ import annotations
 import numpy as np
 import pytest
 from scipy.linalg import cho_factor, cho_solve
+from scipy.sparse import csr_matrix
+from scipy.sparse.csgraph import dijkstra
 
 from gpr_umbrella.integration_2d import (
     _k_f_grad,
@@ -72,6 +74,7 @@ def _analytic_results():
     return {
         "gx": gx,
         "gy": gy,
+        "centers": training.copy(),
         "pmf": pmf,
         "support_mask": np.ones_like(pmf, dtype=bool),
         "support_radius": 0.01,
@@ -398,6 +401,121 @@ def test_requested_endpoints_move_to_deepest_supported_local_minima():
         for x, y in zip(path["x"], path["y"])
     ]
     assert all(results["support_mask"][index] for index in path_indices)
+
+def test_window_centre_mode_requires_explicit_endpoints():
+    with pytest.raises(ValueError, match="requires two explicit endpoints"):
+        find_lowest_barrier_path(_analytic_results(), adjust_endpoints=False)
+
+
+def test_endpoint_minimum_search_can_be_disabled_in_favor_of_window_centres(
+    tmp_path,
+):
+    results = _analytic_results()
+    results["lengthscale"] = np.ones(2)
+    results["centers"] = np.array([
+        [-0.8, 0.0],
+        [0.0, 1.0],
+        [0.8, 0.0],
+    ])
+    middle = int(np.argmin(np.abs(results["gy"])))
+    results["pmf"] = np.full_like(results["pmf"], 10.0)
+    results["pmf"][:, middle] = 2.0
+    results["pmf"][2, middle] = -2.0
+    results["pmf"][-3, middle] = -1.0
+
+    path = find_lowest_barrier_path(
+        results,
+        endpoints=((-1.0, 0.0), (1.0, 0.0)),
+        adjust_endpoints=False,
+    )
+
+    assert path["start_xy"] == pytest.approx((-0.8, 0.0))
+    assert path["end_xy"] == pytest.approx((0.8, 0.0))
+    assert path["start_endpoint"]["window_index"] == 0
+    assert path["end_endpoint"]["window_index"] == 2
+    assert path["start_endpoint"]["selection"] == "nearest_window_center"
+    assert path["end_endpoint"]["selection"] == "nearest_window_center"
+    assert path["endpoint_selection"] == "window_centre"
+    assert path["endpoints_adjusted"] is False
+    assert path["endpoint_search_radius"] is None
+
+    output = tmp_path / "window_centres_path.dat"
+    save_lowest_barrier_path(path, str(output))
+    header = output.read_text()
+    assert "endpoint selection = nearest restraint-window centres" in header
+    assert "window indices = (0, 2)" in header
+
+
+def test_window_centre_endpoint_must_be_path_valid():
+    results = _analytic_results()
+    results["centers"] = np.array([[-1.0, 0.0], [1.0, 0.0]])
+    results["path_valid_mask"] = results["support_mask"].copy()
+    start = (0, int(np.argmin(np.abs(results["gy"]))))
+    results["path_valid_mask"][start] = False
+
+    with pytest.raises(ValueError, match="window centre.*path-valid"):
+        find_lowest_barrier_path(
+            results,
+            endpoints=((-1.0, 0.0), (1.0, 0.0)),
+            adjust_endpoints=False,
+        )
+
+
+def _independent_graph_optimum(pmf, support, start, end, dx, dy):
+    """Solve the discrete lexicographic objective via SciPy graph routines."""
+    shape = pmf.shape
+    node_count = pmf.size
+    start_flat = np.ravel_multi_index(start, shape)
+    end_flat = np.ravel_multi_index(end, shape)
+    steps = [
+        (-1, 0, dx), (1, 0, dx),
+        (0, -1, dy), (0, 1, dy),
+        (-1, -1, np.hypot(dx, dy)), (-1, 1, np.hypot(dx, dy)),
+        (1, -1, np.hypot(dx, dy)), (1, 1, np.hypot(dx, dy)),
+    ]
+    for threshold in np.unique(pmf[support]):
+        allowed = support & (pmf <= threshold)
+        if not allowed[start] or not allowed[end]:
+            continue
+        rows, columns, weights = [], [], []
+        for i, j in np.argwhere(allowed):
+            source = np.ravel_multi_index((i, j), shape)
+            for di, dj, weight in steps:
+                ni, nj = i + di, j + dj
+                if 0 <= ni < shape[0] and 0 <= nj < shape[1] and allowed[ni, nj]:
+                    rows.append(source)
+                    columns.append(np.ravel_multi_index((ni, nj), shape))
+                    weights.append(weight)
+        graph = csr_matrix((weights, (rows, columns)), shape=(node_count, node_count))
+        distances = dijkstra(graph, directed=True, indices=start_flat)
+        if np.isfinite(distances[end_flat]):
+            return float(threshold), float(distances[end_flat])
+    raise AssertionError("Test support unexpectedly disconnects its endpoints")
+
+
+@pytest.mark.parametrize("seed", range(12))
+def test_minimax_path_matches_independent_global_graph_optimum(seed):
+    """Barrier and length are globally optimal on the finite 8-neighbor graph."""
+    rng = np.random.default_rng(seed)
+    pmf = rng.normal(size=(4, 4))
+    support = rng.random((4, 4)) > 0.25
+    support[0, :] = True
+    support[:, -1] = True
+    start, end = (0, 0), (3, 3)
+    dx, dy = 0.7, 1.3
+
+    path = _minimax_path(pmf, start, end, dx, dy, support)
+    returned_bottleneck = max(pmf[index] for index in path)
+    returned_length = sum(
+        np.hypot((b[0] - a[0]) * dx, (b[1] - a[1]) * dy)
+        for a, b in zip(path, path[1:])
+    )
+    expected_bottleneck, expected_length = _independent_graph_optimum(
+        pmf, support, start, end, dx, dy
+    )
+
+    assert returned_bottleneck == pytest.approx(expected_bottleneck)
+    assert returned_length == pytest.approx(expected_length)
 
 
 def test_path_avoids_cells_excluded_by_the_path_valid_mask():

@@ -560,8 +560,10 @@ def reconstruct_pmf_2d(
     window means. ``support_radius`` is the radius in GP lengthscales, giving
     ellipse semiaxes ``support_radius * lengthscale``. Set
     ``restrict_to_sampled_support=False`` to recover the unrestricted grid.
-    Explicit path endpoints are moved to nearby supported minima by default;
-    ``path_endpoint_radius`` controls that search in GP-lengthscale units.
+    Explicit path endpoints are moved to nearby path-valid minima by default;
+    ``path_endpoint_radius`` controls that search in GP-lengthscale units. Set
+    ``adjust_path_endpoints=False`` to use the nearest restraint-window centres
+    instead.
     """
     if (colvar_dir is None) == (data is None):
         raise ValueError("Provide exactly one of colvar_dir or data.")

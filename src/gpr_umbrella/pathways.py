@@ -167,28 +167,50 @@ def _adjust_endpoint_pair(
     )
 
 
-def _fixed_endpoint(
-    xy, gx, gy, pmf, support_mask, components, name, lengthscale
+def _window_center_endpoint(
+    nominal_xy, centers, gx, gy, pmf, support_mask, components, name, lengthscale
 ) -> dict:
-    """Represent an explicitly requested endpoint without minimum adjustment."""
-    ij = _snap(xy, gx, gy)
+    """Select the restraint-window centre nearest a requested endpoint."""
+    nominal = np.asarray(nominal_xy, dtype=float)
+    centers = np.asarray(centers, dtype=float)
+    if (
+        centers.ndim != 2
+        or centers.shape[1] != 2
+        or not np.all(np.isfinite(centers))
+    ):
+        raise ValueError(
+            "results centers must be a finite (n_windows, 2) array when "
+            "adjust_endpoints=False"
+        )
+    distances = np.linalg.norm((centers - nominal) / lengthscale, axis=1)
+    window_index = int(np.argmin(distances))
+    center = centers[window_index]
+    ij = _snap(center, gx, gy)
     if not support_mask[ij] or not np.isfinite(pmf[ij]):
-        raise ValueError(f"The snapped {name} endpoint is outside sampled support")
-    nominal = np.asarray(xy, dtype=float)
+        raise ValueError(
+            f"The {name} endpoint window centre (window {window_index}) snaps "
+            "outside the path-valid region; enable endpoint adjustment or "
+            "change the sampled-support settings"
+        )
     selected = np.array([gx[ij[0]], gy[ij[1]]], dtype=float)
-    shift = float(np.linalg.norm((selected - nominal) / lengthscale))
     return {
         "ij": ij,
         "xy": (float(selected[0]), float(selected[1])),
         "energy": float(pmf[ij]),
         "component": int(components[ij]),
         "nominal_xy": (float(nominal[0]), float(nominal[1])),
-        "shift_kernel_distance": shift,
-        "selection": "nearest_grid_point_no_adjustment",
+        "window_index": window_index,
+        "window_center_xy": (float(center[0]), float(center[1])),
+        "shift_kernel_distance": float(distances[window_index]),
+        "grid_snap_kernel_distance": float(
+            np.linalg.norm((selected - center) / lengthscale)
+        ),
+        "selection": "nearest_window_center",
         "used_fallback": False,
         "local_minima_in_neighborhood": 0,
         "supported_points_in_neighborhood": 1,
     }
+
 
 def _minimax_path(
     pmf: np.ndarray,
@@ -198,7 +220,14 @@ def _minimax_path(
     dy_scaled: float,
     support_mask: np.ndarray,
 ) -> list[tuple[int, int]]:
-    """Minimize path bottleneck, with normalized length as the tie-break."""
+    """Find the shortest path at the globally minimal PMF bottleneck.
+
+    The first Dijkstra pass computes the exact minimax threshold. The second
+    pass computes the shortest metric path in the subgraph at or below that
+    threshold. Keeping these objectives separate is necessary: a longer prefix
+    with a lower provisional bottleneck can otherwise hide a shorter prefix
+    once both routes cross the same higher saddle.
+    """
     nx, ny = pmf.shape
     diagonal = float(np.hypot(dx_scaled, dy_scaled))
     # Axis 0 indexes gx and therefore uses dx; axis 1 uses dy.
@@ -210,36 +239,55 @@ def _minimax_path(
     ]
 
     best = np.full((nx, ny), np.inf)
-    best_len = np.full((nx, ny), np.inf)
-    previous: dict[tuple[int, int], tuple[int, int]] = {}
     si, sj = start_ij
     ti, tj = end_ij
     if not support_mask[si, sj] or not support_mask[ti, tj]:
         raise ValueError("Both pathway endpoints must lie in the path-valid region")
     best[si, sj] = pmf[si, sj]
-    best_len[si, sj] = 0.0
-    queue = [(pmf[si, sj], 0.0, si, sj)]
+    queue = [(pmf[si, sj], si, sj)]
 
     while queue:
-        bottleneck, length, i, j = heapq.heappop(queue)
-        if (bottleneck, length) > (best[i, j], best_len[i, j]):
+        bottleneck, i, j = heapq.heappop(queue)
+        if bottleneck > best[i, j]:
+            continue
+        if (i, j) == (ti, tj):
+            break
+        for di, dj, _ in steps:
+            ni, nj = i + di, j + dj
+            if not (0 <= ni < nx and 0 <= nj < ny and support_mask[ni, nj]):
+                continue
+            new_bottleneck = max(bottleneck, pmf[ni, nj])
+            if new_bottleneck < best[ni, nj]:
+                best[ni, nj] = new_bottleneck
+                heapq.heappush(queue, (new_bottleneck, ni, nj))
+
+    if not np.isfinite(best[ti, tj]):
+        raise RuntimeError("No path-valid path found between the requested endpoints")
+
+    threshold = best[ti, tj]
+    allowed = support_mask & (pmf <= threshold)
+    best_len = np.full((nx, ny), np.inf)
+    best_len[si, sj] = 0.0
+    previous: dict[tuple[int, int], tuple[int, int]] = {}
+    queue = [(0.0, si, sj)]
+    while queue:
+        length, i, j = heapq.heappop(queue)
+        if length > best_len[i, j]:
             continue
         if (i, j) == (ti, tj):
             break
         for di, dj, distance in steps:
             ni, nj = i + di, j + dj
-            if not (0 <= ni < nx and 0 <= nj < ny and support_mask[ni, nj]):
+            if not (0 <= ni < nx and 0 <= nj < ny and allowed[ni, nj]):
                 continue
-            new_bottleneck = max(bottleneck, pmf[ni, nj])
             new_length = length + distance
-            if (new_bottleneck, new_length) < (best[ni, nj], best_len[ni, nj]):
-                best[ni, nj] = new_bottleneck
+            if new_length < best_len[ni, nj]:
                 best_len[ni, nj] = new_length
                 previous[(ni, nj)] = (i, j)
-                heapq.heappush(queue, (new_bottleneck, new_length, ni, nj))
+                heapq.heappush(queue, (new_length, ni, nj))
 
-    if not np.isfinite(best[ti, tj]):
-        raise RuntimeError("No path-valid path found between the requested endpoints")
+    if not np.isfinite(best_len[ti, tj]):
+        raise RuntimeError("Internal error finding a path at the minimax threshold")
     path = [(ti, tj)]
     while path[-1] != (si, sj):
         path.append(previous[path[-1]])
@@ -643,9 +691,12 @@ def find_lowest_barrier_path(
 ) -> dict:
     """Find a minimum-bottleneck path inside one path-valid component.
 
-    Grid length is only a tie-break between paths with the same bottleneck.
+    The barrier is minimized first; metric path length is minimized exactly
+    among all paths at that barrier.
     Explicit endpoints are moved to the lowest nearby path-valid minima by
-    default. ``endpoint_search_radius`` is measured in GP-lengthscale units;
+    default. With ``adjust_endpoints=False``, each endpoint instead uses the
+    nearest restraint-window centre (snapped to the path grid).
+    ``endpoint_search_radius`` is measured in GP-lengthscale units;
     when omitted it uses the reconstruction's sampled-support radius. Endpoint
     selection and the complete path are restricted to one connected component
     of ``results['path_valid_mask']`` when present, otherwise
@@ -695,6 +746,11 @@ def find_lowest_barrier_path(
         minimum["support_component"] = int(components[minimum["ij"]])
 
     resolved_endpoint_radius = None
+    if endpoints is None and not adjust_endpoints:
+        raise ValueError(
+            "adjust_endpoints=False requires two explicit endpoints so their "
+            "nearest restraint windows can be identified"
+        )
     if endpoints is not None:
         endpoint_values = np.asarray(endpoints, dtype=float)
         if endpoint_values.shape != (2, 2) or not np.all(np.isfinite(endpoint_values)):
@@ -727,18 +783,26 @@ def find_lowest_barrier_path(
                 float(resolved_endpoint_radius),
             )
         else:
-            start_endpoint = _fixed_endpoint(
-                endpoint_values[0], gx, gy, pmf, support, components,
+            try:
+                centers = results["centers"]
+            except KeyError as exc:
+                raise ValueError(
+                    "results must contain restraint-window centers when "
+                    "adjust_endpoints=False"
+                ) from exc
+            start_endpoint = _window_center_endpoint(
+                endpoint_values[0], centers, gx, gy, pmf, support, components,
                 "start", lengthscale,
             )
-            end_endpoint = _fixed_endpoint(
-                endpoint_values[1], gx, gy, pmf, support, components,
+            end_endpoint = _window_center_endpoint(
+                endpoint_values[1], centers, gx, gy, pmf, support, components,
                 "end", lengthscale,
             )
             if start_endpoint["component"] != end_endpoint["component"]:
                 raise ValueError(
                     "Requested endpoints lie in disconnected path-valid "
-                    "components; increase support_radius or adjust the endpoints"
+                    "components; increase support_radius or enable endpoint "
+                    "adjustment"
                 )
     else:
         pairs = [
@@ -784,7 +848,7 @@ def find_lowest_barrier_path(
     start_ij = start_endpoint["ij"]
     end_ij = end_endpoint["ij"]
     if start_ij == end_ij:
-        raise ValueError("The two selected endpoint minima collapse to one grid point")
+        raise ValueError("The two selected endpoints collapse to one grid point")
 
     if metric_scale is None:
         metric_scale = lengthscale.copy()
@@ -845,7 +909,13 @@ def find_lowest_barrier_path(
         "nominal_end_xy": tuple(end_endpoint["nominal_xy"]),
         "start_endpoint": start_endpoint,
         "end_endpoint": end_endpoint,
+        "explicit_endpoints": endpoints is not None,
         "endpoints_adjusted": bool(endpoints is not None and adjust_endpoints),
+        "endpoint_selection": (
+            "nearby_local_minimum" if endpoints is not None and adjust_endpoints
+            else "window_centre" if endpoints is not None
+            else "automatic_minima"
+        ),
         "endpoint_search_radius": (
             float(resolved_endpoint_radius)
             if resolved_endpoint_radius is not None else None
@@ -856,6 +926,10 @@ def find_lowest_barrier_path(
         "end_xy": (float(px[-1]), float(py[-1])),
         "ts_xy": (float(px[ts]), float(py[ts])),
         "ts_s": float(s[ts]),
+        "bottleneck_energy": float(np.max(energy)),
+        "path_metric_length": float(s[-1]),
+        "path_graph_connectivity": 8,
+        "path_objective": "minimum_bottleneck_then_shortest_metric_length",
         "barrier": float(energy_relative[ts]),
         "barrier_err_raw": float(sigma_raw[ts]),
         "barrier_err_calibrated": float(sigma_calibrated[ts]),
@@ -895,13 +969,25 @@ def save_lowest_barrier_path(path_result: dict, path: str) -> None:
     nsx, nsy = path_result.get("nominal_start_xy", (sx, sy))
     nex, ney = path_result.get("nominal_end_xy", (ex, ey))
     endpoint_note = ""
-    if path_result.get("endpoints_adjusted", False):
-        radius = path_result["endpoint_search_radius"]
+    if path_result.get("explicit_endpoints", False):
         endpoint_note = (
             f"requested start = ({nsx:.4f} {cvu[0]}, {nsy:.4f} {cvu[1]}); "
-            f"requested end = ({nex:.4f} {cvu[0]}, {ney:.4f} {cvu[1]}); "
-            f"endpoint search radius = {radius:.6g} GP lengthscales\n"
+            f"requested end = ({nex:.4f} {cvu[0]}, {ney:.4f} {cvu[1]})\n"
         )
+        if path_result["endpoint_selection"] == "nearby_local_minimum":
+            radius = path_result["endpoint_search_radius"]
+            endpoint_note += (
+                "endpoint selection = nearby path-valid minima; "
+                f"search radius = {radius:.6g} GP lengthscales\n"
+            )
+        else:
+            start = path_result["start_endpoint"]
+            end = path_result["end_endpoint"]
+            endpoint_note += (
+                "endpoint selection = nearest restraint-window centres; "
+                f"window indices = ({start['window_index']}, "
+                f"{end['window_index']})\n"
+            )
     tx, ty = path_result["ts_xy"]
     metric = np.asarray(path_result["metric_scale"], dtype=float)
     header = (
