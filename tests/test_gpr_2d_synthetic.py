@@ -7,8 +7,8 @@ the truth to within a tolerance after aligning the additive constant.
 import numpy as np
 
 from gpr_umbrella import reconstruct_pmf_2d
+from gpr_umbrella.support import window_anchored_display_policy
 from gpr_umbrella.plotting_2d import (
-    _window_anchored_display_policy,
     plot_diagnostics_2d,
     plot_lowest_barrier_path,
     plot_pmf_2d,
@@ -99,13 +99,14 @@ def test_barrier_location():
 
 
 def test_lowest_barrier_path_recovers_saddle(tmp_path):
-    """The minimax path connects the wells through the analytic saddle (x~0),
+    """The minimum-range path connects the wells through the analytic saddle (x~0),
     recovers a sensible barrier, and writes both the data file and figure."""
     data = build_synthetic_data()
     res = reconstruct_pmf_2d(
         data=data, output_dir=str(tmp_path), output_prefix="path",
         support_radius=1.0,
         plot=True, plot_diagnostics=False, find_lowest_barrier=True,
+        path_endpoints=((-1.0, -0.5), (1.0, 0.6)),
         path_aligned_marginal=True, thermal_energy=0.15,
         perpendicular_points=31,
         save_outputs=True, verbose=False, cv_names=("x", "y"),
@@ -169,7 +170,7 @@ def test_2d_display_range_is_anchored_at_sampled_means():
         "pmf_std_calibrated": 2.0 * raw,
     }
 
-    display = _window_anchored_display_policy(results)
+    display = window_anchored_display_policy(results)
     lower, upper = display["pmf_limits"]
     assert lower < 0.0 < 2.0 < upper
     assert display["pmf"][0, 2] > upper
@@ -177,7 +178,7 @@ def test_2d_display_range_is_anchored_at_sampled_means():
     assert display["uncertainty_limits"]["pmf_std_raw"][1] < raw[0, 2]
 
     shifted = dict(results, pmf=pmf + 123.0)
-    shifted_display = _window_anchored_display_policy(shifted)
+    shifted_display = window_anchored_display_policy(shifted)
     np.testing.assert_allclose(shifted_display["pmf"], display["pmf"])
     np.testing.assert_allclose(shifted_display["pmf_limits"], display["pmf_limits"])
 
@@ -190,6 +191,8 @@ def test_2d_plots_mark_gp_observations_at_sampled_means():
     res = reconstruct_pmf_2d(
         data=data, plot=False, plot_diagnostics=False, save_outputs=False,
         find_lowest_barrier=True, verbose=False, grid_n=(24, 24),
+        path_endpoints=((-1.0, -0.5), (1.0, 0.6)),
+        support_radius=1.0,
         optimize_hyperparams=False, fixed_sigma_f=1.0,
         fixed_lengthscale=(1.0, 1.0),
     )
@@ -230,7 +233,7 @@ def test_2d_plots_mark_gp_observations_at_sampled_means():
 
     path_fig = plot_lowest_barrier_path(res, res["lowest_barrier_path"])
     path_ax = next(
-        ax for ax in path_fig.axes if ax.get_title() == "Lowest-barrier grid path"
+        ax for ax in path_fig.axes if ax.get_title() == "Exact minimum-range grid path"
     )
     np.testing.assert_allclose(
         _scatter_offsets(path_ax, "sampled means (GP observations)"),
@@ -238,7 +241,7 @@ def test_2d_plots_mark_gp_observations_at_sampled_means():
     )
     path_lines = [
         line for line in path_ax.lines
-        if line.get_label() == "lowest-barrier path"
+        if line.get_label() == "minimum-range path"
     ]
     assert len(path_lines) == 1
     np.testing.assert_allclose(

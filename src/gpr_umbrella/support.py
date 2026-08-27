@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import numpy as np
+from scipy.interpolate import RegularGridInterpolator
 from scipy.spatial import cKDTree
 
 
@@ -56,3 +57,74 @@ def sampled_support_mask(
     tree = cKDTree(window_means / lengthscale)
     nearest_distance, _ = tree.query(points / lengthscale, k=1)
     return nearest_distance <= float(radius)
+
+
+def values_at_window_means(results: dict, field: np.ndarray) -> np.ndarray:
+    """Interpolate a gridded field at the GP observation locations."""
+    interpolator = RegularGridInterpolator(
+        (results["gx"], results["gy"]), np.asarray(field, dtype=float),
+        bounds_error=False, fill_value=np.nan,
+    )
+    points = np.asarray(results["means"], dtype=float).copy()
+    points[:, 0] = np.clip(points[:, 0], results["gx"][0], results["gx"][-1])
+    points[:, 1] = np.clip(points[:, 1], results["gy"][0], results["gy"][-1])
+    values = np.asarray(interpolator(points), dtype=float)
+    values = values[np.isfinite(values)]
+    if values.size == 0:
+        raise ValueError("No finite grid values at the sampled window means")
+    return values
+
+
+def window_anchored_display_policy(results: dict) -> dict:
+    """Return observation-anchored PMF and uncertainty display limits.
+
+    The PMF interval contains the complete range at sampled window means plus
+    a fixed 25 percent margin. Uncertainty intervals contain all values at the
+    window means plus the same margin. These limits keep extrapolative edge
+    excursions from flattening meaningful detail in the sampled region.
+    """
+    pmf_at_means = values_at_window_means(results, results["pmf"])
+    reference = float(np.min(pmf_at_means))
+    span = float(np.ptp(pmf_at_means))
+
+    calibrated_at_means = values_at_window_means(
+        results, results["pmf_std_calibrated"]
+    )
+    typical_sigma = float(np.median(calibrated_at_means))
+    padding = (
+        0.25 * span if span > 1e-12 else max(2.0 * typical_sigma, 1e-9)
+    )
+
+    uncertainty_limits = {}
+    for key in ("pmf_std_raw", "pmf_std_calibrated"):
+        at_means = values_at_window_means(results, results[key])
+        uncertainty_limits[key] = (
+            0.0, max(1.25 * float(np.max(at_means)), 1e-9)
+        )
+
+    return {
+        "pmf_reference": reference,
+        "pmf": np.asarray(results["pmf"], dtype=float) - reference,
+        "pmf_limits": (-padding, span + padding),
+        "uncertainty_limits": uncertainty_limits,
+    }
+
+
+def path_valid_mask(results: dict, display_policy: dict | None = None) -> np.ndarray:
+    """Return finite, geometrically supported, non-warning PMF cells."""
+    display = (
+        window_anchored_display_policy(results)
+        if display_policy is None else display_policy
+    )
+    lower, upper = display["pmf_limits"]
+    tolerance = 1e-12 * max(1.0, abs(lower), abs(upper))
+    pmf = np.asarray(display["pmf"], dtype=float)
+    support = np.asarray(results["support_mask"], dtype=bool)
+    if pmf.shape != support.shape:
+        raise ValueError("PMF and support mask must have matching shapes")
+    return (
+        support
+        & np.isfinite(pmf)
+        & (pmf >= lower - tolerance)
+        & (pmf <= upper + tolerance)
+    )

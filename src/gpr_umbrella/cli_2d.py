@@ -56,35 +56,11 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--no-diagnostics", action="store_true",
                    help="Skip the 8-panel sampling/fit diagnostics figure")
     p.add_argument("--find-lowest-barrier-path", action="store_true",
-                   help="Find the minimum-bottleneck path between two states")
+                   help="Find the exact minimum-PMF-range grid path")
     p.add_argument("--path-endpoints", type=float, nargs=4, default=None,
                    metavar=("X0", "Y0", "X1", "Y1"),
-                   help="Physical (cv0,cv1) coords of the two states to connect "
-                        "(default: the two deepest minima)")
-    p.add_argument(
-        "--path-endpoint-radius", type=float, default=None,
-        help="Search radius for relocating each requested endpoint to a "
-             "path-valid minimum, in GP lengthscales "
-             "(default: support radius)",
-    )
-    p.add_argument(
-        "--adjust-path-endpoints",
-        action=argparse.BooleanOptionalAction,
-        default=True,
-        help="Relocate requested endpoints to nearby path-valid minima; "
-             "disable to use the nearest restraint-window centres "
-             "(default: enabled)",
-    )
-    p.add_argument(
-        "--path-gradient-weight", type=float, default=1.0,
-        help="Gradient-alignment weight among exact minimum-barrier paths; "
-             "zero gives the geometric shortest path (default: 1.0)",
-    )
-    p.add_argument(
-        "--path-uncertainty-weight", type=float, default=0.0, metavar="BETA",
-        help="Search on mean dF from start + BETA times its posterior sigma "
-             "(default: 0, mean-only minimax)",
-    )
+                   help="Required search-mode endpoint coordinates; snapped "
+                        "only to the nearest path-valid grid cells")
     p.add_argument(
         "--path-mode", choices=("search", "corridor", "fixed"), default="search",
         help="Free grid search, corridor search, or direct reference-path evaluation",
@@ -118,8 +94,11 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv=None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
+    path_requested = args.find_lowest_barrier_path or args.path_aligned_marginal
     if args.path_aligned_marginal and args.thermal_energy is None:
         parser.error("--path-aligned-marginal requires --thermal-energy KBT")
+    if path_requested and args.path_mode == "search" and args.path_endpoints is None:
+        parser.error("--path-mode search requires --path-endpoints")
     if args.path_mode != "search" and args.path_reference is None:
         parser.error("--path-mode corridor/fixed requires --path-reference FILE")
     if args.path_mode == "corridor" and args.path_corridor_radius is None:
@@ -128,12 +107,8 @@ def main(argv=None) -> int:
         parser.error("--path-reference requires --path-mode corridor or fixed")
     if args.path_mode != "corridor" and args.path_corridor_radius is not None:
         parser.error("--path-corridor-radius requires --path-mode corridor")
-    if args.path_mode == "fixed" and args.path_endpoints is not None:
-        parser.error("--path-mode fixed uses the reference trajectory endpoints")
-    if args.path_uncertainty_weight < 0:
-        parser.error("--path-uncertainty-weight must be non-negative")
-    if args.path_mode == "fixed" and args.path_uncertainty_weight > 0:
-        parser.error("a fixed trajectory cannot be selected by uncertainty")
+    if args.path_mode != "search" and args.path_endpoints is not None:
+        parser.error("corridor/fixed modes use the reference trajectory endpoints")
     reference_path = None
     if args.path_reference is not None:
         try:
@@ -166,10 +141,6 @@ def main(argv=None) -> int:
         find_lowest_barrier=args.find_lowest_barrier_path,
         path_endpoints=((tuple(args.path_endpoints[:2]), tuple(args.path_endpoints[2:]))
                         if args.path_endpoints else None),
-        path_endpoint_radius=args.path_endpoint_radius,
-        adjust_path_endpoints=args.adjust_path_endpoints,
-        path_gradient_weight=args.path_gradient_weight,
-        path_uncertainty_weight=args.path_uncertainty_weight,
         path_reference=reference_path,
         path_mode=args.path_mode,
         path_corridor_radius=args.path_corridor_radius,

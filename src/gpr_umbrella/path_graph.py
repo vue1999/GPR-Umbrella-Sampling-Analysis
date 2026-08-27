@@ -1,9 +1,86 @@
-"""Finite-grid minimax path search with optional gradient alignment."""
+"""Exact minimum-range paths on a finite two-dimensional grid."""
 from __future__ import annotations
 
 import heapq
 
 import numpy as np
+from scipy.ndimage import label
+
+
+_NEIGHBORHOOD = np.ones((3, 3), dtype=np.uint8)
+
+
+def _connected(
+    mask: np.ndarray,
+    start: tuple[int, int],
+    end: tuple[int, int],
+) -> bool:
+    """Return whether two cells share one 8-connected component."""
+    if not mask[start] or not mask[end]:
+        return False
+    components, _ = label(mask, structure=_NEIGHBORHOOD)
+    return bool(components[start] == components[end])
+
+
+def minimum_energy_interval(
+    node_energy: np.ndarray,
+    start_ij: tuple[int, int],
+    end_ij: tuple[int, int],
+    support_mask: np.ndarray,
+) -> tuple[float, float, np.ndarray]:
+    """Find the narrowest energy interval connecting two supported cells.
+
+    The lower threshold is advanced through sorted node energies while the
+    smallest feasible upper threshold advances monotonically. The returned
+    interval therefore exactly minimizes ``upper - lower`` on the finite
+    8-neighbour graph. Equal-width intervals prefer the lower upper bound.
+    """
+    energy = np.asarray(node_energy, dtype=float)
+    support = np.asarray(support_mask, dtype=bool) & np.isfinite(energy)
+    if energy.ndim != 2 or support.shape != energy.shape:
+        raise ValueError("node_energy and support_mask must be matching 2D arrays")
+    if not support[start_ij] or not support[end_ij]:
+        raise ValueError("Both pathway endpoints must lie in the path-valid region")
+    if not _connected(support, start_ij, end_ij):
+        raise ValueError("Pathway endpoints lie in disconnected path-valid regions")
+
+    start_energy = float(energy[start_ij])
+    end_energy = float(energy[end_ij])
+    endpoint_low = min(start_energy, end_energy)
+    endpoint_high = max(start_energy, end_energy)
+    levels = np.unique(energy[support])
+    lower_levels = levels[levels <= endpoint_low]
+    upper_levels = levels[levels >= endpoint_high]
+
+    best: tuple[float, float, float] | None = None
+    upper_index = 0
+    for lower in lower_levels:
+        while upper_index < len(upper_levels):
+            upper = upper_levels[upper_index]
+            interval_mask = support & (energy >= lower) & (energy <= upper)
+            if _connected(interval_mask, start_ij, end_ij):
+                break
+            upper_index += 1
+        if upper_index == len(upper_levels):
+            break
+        upper = float(upper_levels[upper_index])
+        lower = float(lower)
+        width = upper - lower
+        candidate = (width, upper, -lower)
+        scale = max(1.0, abs(width), abs(upper), abs(lower))
+        tolerance = 1e-12 * scale
+        if best is None or candidate[0] < best[0] - tolerance or (
+            abs(candidate[0] - best[0]) <= tolerance
+            and candidate[1:] < best[1:]
+        ):
+            best = candidate
+
+    if best is None:
+        raise RuntimeError("No path-valid energy interval connects the endpoints")
+    lower = -best[2]
+    upper = best[1]
+    allowed = support & (energy >= lower) & (energy <= upper)
+    return float(lower), float(upper), allowed
 
 
 def _gradient_alignment_penalty(
@@ -24,23 +101,27 @@ def _gradient_alignment_penalty(
     return reliability * sine_squared
 
 
-def minimax_path(
-    node_score: np.ndarray,
+def minimum_range_path(
+    node_energy: np.ndarray,
     start_ij: tuple[int, int],
     end_ij: tuple[int, int],
     dx_scaled: float,
     dy_scaled: float,
     support_mask: np.ndarray,
     gradient_scaled: np.ndarray | None = None,
-    gradient_alignment_weight: float = 0.0,
-) -> list[tuple[int, int]]:
-    """Find a gradient-aligned path at the globally minimal node bottleneck.
+) -> tuple[list[tuple[int, int]], float, float]:
+    """Return a representative path in the exact minimum energy interval.
 
-    The first Dijkstra pass computes the exact minimax threshold. The second
-    minimizes metric length plus gradient misalignment inside that sublevel
-    graph. ``node_score`` may be a mean PMF or a risk-adjusted PMF score.
+    The interval width is the primary objective. Inside that interval Dijkstra
+    minimizes length multiplied by ``1 + reliability * sin(angle)**2``. This
+    fixed secondary rule prefers gradient-aligned paths without changing the
+    exact minimum-range guarantee.
     """
-    nx, ny = node_score.shape
+    energy = np.asarray(node_energy, dtype=float)
+    lower, upper, allowed = minimum_energy_interval(
+        energy, start_ij, end_ij, support_mask
+    )
+    nx, ny = energy.shape
     diagonal = float(np.hypot(dx_scaled, dy_scaled))
     steps = [
         (-1, 0, dx_scaled), (1, 0, dx_scaled),
@@ -49,59 +130,26 @@ def minimax_path(
         (1, -1, diagonal), (1, 1, diagonal),
     ]
 
-    best = np.full((nx, ny), np.inf)
-    si, sj = start_ij
-    ti, tj = end_ij
-    if not support_mask[si, sj] or not support_mask[ti, tj]:
-        raise ValueError("Both pathway endpoints must lie in the path-valid region")
-    best[si, sj] = node_score[si, sj]
-    queue = [(node_score[si, sj], si, sj)]
-    while queue:
-        bottleneck, i, j = heapq.heappop(queue)
-        if bottleneck > best[i, j]:
-            continue
-        if (i, j) == (ti, tj):
-            break
-        for di, dj, _ in steps:
-            ni, nj = i + di, j + dj
-            if not (0 <= ni < nx and 0 <= nj < ny and support_mask[ni, nj]):
-                continue
-            candidate = max(bottleneck, node_score[ni, nj])
-            if candidate < best[ni, nj]:
-                best[ni, nj] = candidate
-                heapq.heappush(queue, (candidate, ni, nj))
-    if not np.isfinite(best[ti, tj]):
-        raise RuntimeError("No path-valid path found between the requested endpoints")
-
-    threshold = best[ti, tj]
-    allowed = support_mask & (node_score <= threshold)
-    if isinstance(gradient_alignment_weight, (bool, np.bool_)):
-        raise ValueError("gradient_alignment_weight must be finite and non-negative")
-    gradient_alignment_weight = float(gradient_alignment_weight)
-    if not np.isfinite(gradient_alignment_weight) or gradient_alignment_weight < 0:
-        raise ValueError("gradient_alignment_weight must be finite and non-negative")
     gradient_floor = 1.0
     if gradient_scaled is not None:
         gradient_scaled = np.asarray(gradient_scaled, dtype=float)
-        if gradient_scaled.shape != node_score.shape + (2,):
-            raise ValueError("gradient_scaled must have shape node_score.shape + (2,)")
+        if gradient_scaled.shape != energy.shape + (2,):
+            raise ValueError("gradient_scaled must have shape node_energy.shape + (2,)")
         if not np.all(np.isfinite(gradient_scaled[allowed])):
-            raise ValueError("gradient_scaled must be finite in the minimax sublevel set")
+            raise ValueError("gradient_scaled must be finite in the optimal interval")
         typical = float(np.median(np.linalg.norm(gradient_scaled[allowed], axis=1)))
         if typical > 0.0:
             gradient_floor = 0.1 * typical
-    elif gradient_alignment_weight > 0.0:
-        raise ValueError("gradient_scaled is required when gradient alignment is enabled")
 
     best_cost = np.full((nx, ny), np.inf)
-    best_cost[si, sj] = 0.0
+    best_cost[start_ij] = 0.0
     previous: dict[tuple[int, int], tuple[int, int]] = {}
-    queue = [(0.0, si, sj)]
+    queue = [(0.0, *start_ij)]
     while queue:
         cost, i, j = heapq.heappop(queue)
         if cost > best_cost[i, j]:
             continue
-        if (i, j) == (ti, tj):
+        if (i, j) == end_ij:
             break
         for di, dj, distance in steps:
             ni, nj = i + di, j + dj
@@ -114,16 +162,15 @@ def minimax_path(
                 )
                 if gradient_scaled is not None else 0.0
             )
-            candidate = cost + distance * (
-                1.0 + gradient_alignment_weight * alignment
-            )
+            candidate = cost + distance * (1.0 + alignment)
             if candidate < best_cost[ni, nj]:
                 best_cost[ni, nj] = candidate
                 previous[(ni, nj)] = (i, j)
                 heapq.heappush(queue, (candidate, ni, nj))
-    if not np.isfinite(best_cost[ti, tj]):
-        raise RuntimeError("Internal error finding a path at the minimax threshold")
-    path = [(ti, tj)]
-    while path[-1] != (si, sj):
+
+    if not np.isfinite(best_cost[end_ij]):
+        raise RuntimeError("Internal error selecting a path in the optimal interval")
+    path = [end_ij]
+    while path[-1] != start_ij:
         path.append(previous[path[-1]])
-    return path[::-1]
+    return path[::-1], lower, upper

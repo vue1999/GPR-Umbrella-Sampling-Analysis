@@ -42,7 +42,11 @@ from .integration_1d import (
     compute_tau_int,
 )
 
-from .support import sampled_support_mask
+from .support import (
+    path_valid_mask as build_path_valid_mask,
+    sampled_support_mask,
+    window_anchored_display_policy,
+)
 
 # ---------------------------------------------------------------------------
 # Data loading (2D PLUMED COLVAR + per-window centre/kappa files)
@@ -536,10 +540,6 @@ def reconstruct_pmf_2d(
     find_lowest_barrier: bool = False,
     path_endpoints=None,
     path_metric_scale: tuple[float, float] | None = None,
-    path_endpoint_radius: float | None = None,
-    adjust_path_endpoints: bool = True,
-    path_gradient_weight: float = 1.0,
-    path_uncertainty_weight: float = 0.0,
     path_reference: np.ndarray | None = None,
     path_mode: str = "search",
     path_corridor_radius: float | None = None,
@@ -560,20 +560,11 @@ def reconstruct_pmf_2d(
     gradients are interpreted in ``energy_unit / cv_units[d]²`` and
     ``energy_unit / cv_units[d]``, respectively.
 
-    By default the reference, plots, path search, and transverse integration
-    are restricted to the union of kernel-scaled neighborhoods around sampled
-    window means. ``support_radius`` is the radius in GP lengthscales, giving
-    ellipse semiaxes ``support_radius * lengthscale``. Set
-    ``restrict_to_sampled_support=False`` to recover the unrestricted grid.
-    Explicit path endpoints are moved to nearby path-valid minima by default;
-    ``path_endpoint_radius`` controls that search in GP-lengthscale units. Set
-    ``adjust_path_endpoints=False`` to use the nearest restraint-window centres
-    instead. ``path_gradient_weight`` controls the MEP-like gradient-alignment
-    preference among exact minimum-barrier paths; zero selects the shortest.
-    ``path_uncertainty_weight`` searches a one-sided upper-confidence surface.
-    ``path_mode`` selects free search, a corridor around ``path_reference``, or
-    direct evaluation of that fixed trajectory; corridor radii use the scaled
-    path metric.
+    By default plots, path search, and transverse integration are restricted
+    to the union of kernel-scaled neighborhoods around sampled window means.
+    ``support_radius`` gives the radius in GP lengthscales. ``path_mode``
+    selects free search between required endpoints, corridor search using a
+    reference trajectory, or direct evaluation of that fixed trajectory.
     """
     if (colvar_dir is None) == (data is None):
         raise ValueError("Provide exactly one of colvar_dir or data.")
@@ -835,18 +826,10 @@ def reconstruct_pmf_2d(
         },
     }
 
-    # Path validity is the intersection of geometric sampling support and the
-    # non-red, observation-anchored PMF range used by the surface plots.
-    from .plotting_2d import _window_anchored_display_policy
-    display_policy = _window_anchored_display_policy(results)
-    display_lower, display_upper = display_policy["pmf_limits"]
-    tolerance = 1e-12 * max(1.0, abs(display_lower), abs(display_upper))
-    path_valid_mask = (
-        results["support_mask"]
-        & (display_policy["pmf"] >= display_lower - tolerance)
-        & (display_policy["pmf"] <= display_upper + tolerance)
-    )
-    results["path_valid_mask"] = path_valid_mask
+    # Plotting and pathfinding consume the same observation-anchored policy.
+    display_policy = window_anchored_display_policy(results)
+    valid_mask = build_path_valid_mask(results, display_policy)
+    results["path_valid_mask"] = valid_mask
     results["path_valid_kind"] = (
         "sampled_support_and_window_anchored_pmf_range"
     )
@@ -861,7 +844,7 @@ def reconstruct_pmf_2d(
         flat = np.column_stack([GX.ravel(), GY.ravel(),
                                 pmf.ravel(), pmf_std_raw,
                                 pmf_std_calibrated, support_mask.astype(int),
-                                path_valid_mask.ravel().astype(int)])
+                                valid_mask.ravel().astype(int)])
         pmf_path = os.path.join(out, f"{output_prefix}_pmf_2d.dat")
         np.savetxt(pmf_path, flat,
                    header=f"{cv_names[0]}({cv_units[0]}) {cv_names[1]}({cv_units[1]}) "
@@ -899,10 +882,6 @@ def reconstruct_pmf_2d(
             results,
             endpoints=path_endpoints,
             metric_scale=path_metric_scale,
-            endpoint_search_radius=path_endpoint_radius,
-            adjust_endpoints=adjust_path_endpoints,
-            gradient_alignment_weight=path_gradient_weight,
-            uncertainty_weight=path_uncertainty_weight,
             reference_path=path_reference,
             path_mode=path_mode,
             corridor_radius=path_corridor_radius,

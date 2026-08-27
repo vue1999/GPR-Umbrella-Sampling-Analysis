@@ -73,7 +73,8 @@ def test_cli_help_parses_successfully(capsys: pytest.CaptureFixture[str]) -> Non
     assert "--restrict-to-sampled-support" in help_text
 
 
-def test_2d_path_options_are_exposed_and_find_mep_is_retired() -> None:
+
+def test_2d_path_options_are_minimal_and_find_mep_is_retired() -> None:
     parser = cli_2d.build_parser()
     option_strings = {
         option
@@ -82,79 +83,61 @@ def test_2d_path_options_are_exposed_and_find_mep_is_retired() -> None:
     }
     assert {
         "--find-lowest-barrier-path",
-        "--path-aligned-marginal",
-        "--thermal-energy",
-        "--restrict-to-sampled-support",
-        "--path-endpoint-radius",
-        "--adjust-path-endpoints",
-        "--path-gradient-weight",
-        "--path-uncertainty-weight",
+        "--path-endpoints",
         "--path-mode",
         "--path-reference",
         "--path-corridor-radius",
+        "--path-metric-scales",
+        "--path-aligned-marginal",
+        "--thermal-energy",
+        "--restrict-to-sampled-support",
+        "--support-radius",
     } <= option_strings
-    assert "--find-mep" not in option_strings
+    assert {
+        "--path-endpoint-radius",
+        "--adjust-path-endpoints",
+        "--no-adjust-path-endpoints",
+        "--path-gradient-weight",
+        "--path-uncertainty-weight",
+        "--find-mep",
+    }.isdisjoint(option_strings)
 
     parsed = parser.parse_args([
         "--colvar-dir", "unused",
         "--find-lowest-barrier-path",
+        "--path-endpoints", "-1", "0", "1", "0",
         "--path-aligned-marginal",
         "--thermal-energy", "0.025",
     ])
     assert parsed.find_lowest_barrier_path is True
+    assert parsed.path_endpoints == [-1.0, 0.0, 1.0, 0.0]
     assert parsed.path_aligned_marginal is True
     assert parsed.thermal_energy == pytest.approx(0.025)
     assert parsed.restrict_to_sampled_support is True
     assert parsed.support_radius == pytest.approx(0.5)
-    assert parsed.adjust_path_endpoints is True
-    assert parsed.path_gradient_weight == pytest.approx(1.0)
-    assert parsed.path_uncertainty_weight == pytest.approx(0.0)
     assert parsed.path_mode == "search"
-    assert parsed.path_reference is None
-    assert parsed.path_corridor_radius is None
 
-    restricted = parser.parse_args([
+    corridor = parser.parse_args([
         "--colvar-dir", "unused",
-        "--restrict-to-sampled-support",
         "--support-radius", "2.25",
-        "--path-endpoint-radius", "0.75",
-        "--path-gradient-weight", "2.5",
-        "--path-uncertainty-weight", "1.5",
         "--path-mode", "corridor",
         "--path-reference", "neb.dat",
         "--path-corridor-radius", "0.25",
-        "--no-adjust-path-endpoints",
     ])
-    assert restricted.restrict_to_sampled_support is True
-    assert restricted.path_uncertainty_weight == pytest.approx(1.5)
-    assert restricted.path_mode == "corridor"
-    assert restricted.path_reference == "neb.dat"
-    assert restricted.path_corridor_radius == pytest.approx(0.25)
-    assert restricted.support_radius == pytest.approx(2.25)
-    assert restricted.path_endpoint_radius == pytest.approx(0.75)
-    assert restricted.adjust_path_endpoints is False
-    assert restricted.path_gradient_weight == pytest.approx(2.5)
-
-    with pytest.raises(SystemExit) as retired_option:
-        parser.parse_args(["--colvar-dir", "unused", "--find-mep"])
-    assert retired_option.value.code != 0
+    assert corridor.path_mode == "corridor"
+    assert corridor.path_reference == "neb.dat"
+    assert corridor.path_corridor_radius == pytest.approx(0.25)
+    assert corridor.support_radius == pytest.approx(2.25)
 
 
-def test_2d_cli_forwards_sampled_support_options(monkeypatch) -> None:
+def test_2d_cli_forwards_only_retained_support_and_path_options(monkeypatch) -> None:
     calls = []
-
     monkeypatch.setattr(
-        cli_2d,
-        "reconstruct_pmf_2d",
-        lambda **kwargs: calls.append(kwargs),
+        cli_2d, "reconstruct_pmf_2d", lambda **kwargs: calls.append(kwargs)
     )
     assert cli_2d.main([
         "--colvar-dir", "unused",
-        "--restrict-to-sampled-support",
         "--support-radius", "2.25",
-        "--path-endpoint-radius", "0.75",
-        "--path-gradient-weight", "2.5",
-        "--no-adjust-path-endpoints",
         "--no-plot",
         "--no-diagnostics",
     ]) == 0
@@ -162,9 +145,20 @@ def test_2d_cli_forwards_sampled_support_options(monkeypatch) -> None:
     assert len(calls) == 1
     assert calls[0]["restrict_to_sampled_support"] is True
     assert calls[0]["support_radius"] == pytest.approx(2.25)
-    assert calls[0]["path_endpoint_radius"] == pytest.approx(0.75)
-    assert calls[0]["adjust_path_endpoints"] is False
-    assert calls[0]["path_gradient_weight"] == pytest.approx(2.5)
+    for removed in (
+        "path_endpoint_radius", "adjust_path_endpoints",
+        "path_gradient_weight", "path_uncertainty_weight",
+    ):
+        assert removed not in calls[0]
+
+
+def test_2d_cli_requires_search_endpoints(monkeypatch) -> None:
+    monkeypatch.setattr(cli_2d, "reconstruct_pmf_2d", lambda **kwargs: {})
+    with pytest.raises(SystemExit) as missing:
+        cli_2d.main([
+            "--colvar-dir", "unused", "--find-lowest-barrier-path"
+        ])
+    assert missing.value.code != 0
 
 
 def test_2d_cli_loads_reference_trajectory(tmp_path, monkeypatch):
@@ -183,6 +177,8 @@ def test_2d_cli_loads_reference_trajectory(tmp_path, monkeypatch):
         "--path-mode", "fixed",
         "--path-reference", str(reference_file),
     ]) == 0
-    np.testing.assert_allclose(captured["path_reference"], [[0.0, 1.0], [2.0, 3.0]])
+    np.testing.assert_allclose(
+        captured["path_reference"], [[0.0, 1.0], [2.0, 3.0]]
+    )
     assert captured["path_mode"] == "fixed"
     assert captured["path_corridor_radius"] is None

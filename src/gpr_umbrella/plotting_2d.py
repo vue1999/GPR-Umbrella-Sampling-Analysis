@@ -4,64 +4,7 @@ from __future__ import annotations
 import numpy as np
 
 from .plotting_1d import PALETTE, apply_plot_style, _band, _annotate
-
-
-def _values_at_window_means(results: dict, field: np.ndarray) -> np.ndarray:
-    """Interpolate a gridded field at the GP observation locations."""
-    from scipy.interpolate import RegularGridInterpolator
-
-    interpolator = RegularGridInterpolator(
-        (results["gx"], results["gy"]), np.asarray(field, dtype=float),
-        bounds_error=False, fill_value=np.nan,
-    )
-    points = np.asarray(results["means"], dtype=float).copy()
-    points[:, 0] = np.clip(points[:, 0], results["gx"][0], results["gx"][-1])
-    points[:, 1] = np.clip(points[:, 1], results["gy"][0], results["gy"][-1])
-    values = np.asarray(interpolator(points), dtype=float)
-    values = values[np.isfinite(values)]
-    if values.size == 0:
-        raise ValueError("No finite grid values at the sampled window means")
-    return values
-
-
-def _window_anchored_display_policy(results: dict) -> dict:
-    """Choose robust, observation-anchored colour limits for 2D fields.
-
-    The GP is constrained by mean-force observations at the sampled window
-    means, whereas large excursions near the edge of sampled support are much
-    more extrapolative. The normal PMF colour range therefore contains the
-    complete min--max range at the window means, with a 25% margin. The
-    uncertainty panels similarly contain every uncertainty evaluated at a
-    window mean. Values beyond these limits are retained and drawn with the
-    warning colour. Reconstruction also intersects this normal PMF range with
-    geometric sampling support to define endpoint and path validity.
-    """
-    pmf_at_means = _values_at_window_means(results, results["pmf"])
-    reference = float(np.min(pmf_at_means))
-    span = float(np.ptp(pmf_at_means))
-
-    calibrated_at_means = _values_at_window_means(
-        results, results["pmf_std_calibrated"]
-    )
-    typical_sigma = float(np.median(calibrated_at_means))
-    if span > 1e-12:
-        padding = 0.25 * span
-    else:
-        padding = max(2.0 * typical_sigma, 1e-9)
-
-    uncertainty_limits = {}
-    for key in ("pmf_std_raw", "pmf_std_calibrated"):
-        at_means = _values_at_window_means(results, results[key])
-        uncertainty_limits[key] = (0.0, max(1.25 * float(np.max(at_means)), 1e-9))
-
-    return {
-        "pmf_reference": reference,
-        "pmf": np.asarray(results["pmf"], dtype=float) - reference,
-        "pmf_limits": (-padding, span + padding),
-        "uncertainty_limits": uncertainty_limits,
-    }
-
-
+from .support import window_anchored_display_policy
 def _bounded_contourf(ax, GX, GY, values, limits, cmap_name, *,
                       levels=30, warn_below=True, alpha=1.0):
     """Draw fixed-level contours and mark values beyond the limits in red."""
@@ -106,7 +49,7 @@ def plot_pmf_2d(results: dict, output_path: str | None = None,
 
     GX, GY = results["GX"], results["GY"]
     mask = ~results["support_mask"]
-    display = _window_anchored_display_policy(results)
+    display = window_anchored_display_policy(results)
     pmf = np.ma.masked_where(mask, display["pmf"])
     pmf_std_raw = np.ma.masked_where(mask, results["pmf_std_raw"])
     pmf_std_calibrated = np.ma.masked_where(mask, results["pmf_std_calibrated"])
@@ -231,7 +174,7 @@ def plot_diagnostics_2d(results: dict, output_path: str | None = None,
 
     GX, GY = results["GX"], results["GY"]
     mask = ~results["support_mask"]
-    display = _window_anchored_display_policy(results)
+    display = window_anchored_display_policy(results)
     pmf = np.ma.masked_where(mask, display["pmf"])
     uncertainty_key = f"pmf_std_{results['default_uncertainty']}"
     pmf_std = np.ma.masked_where(mask, results[uncertainty_key])
@@ -448,7 +391,7 @@ def plot_lowest_barrier_path(results: dict, path_result: dict,
     apply_plot_style()
 
     GX, GY = results["GX"], results["GY"]
-    display = _window_anchored_display_policy(results)
+    display = window_anchored_display_policy(results)
     pmf = np.ma.masked_where(~results["support_mask"], display["pmf"])
     centers = results["centers"]
     means = results["means"]
@@ -479,7 +422,7 @@ def plot_lowest_barrier_path(results: dict, path_result: dict,
         label=f"PMF − sampled-window minimum ({eu}); red = outside display range",
     )
     mode = path_result.get("path_mode", "search")
-    path_label = "lowest-barrier path" if mode == "search" else "selected path"
+    path_label = "minimum-range path" if mode != "fixed" else "fixed path"
     ax.plot(path_result["x"], path_result["y"], color="black", linestyle="--",
             linewidth=1.4, dash_capstyle="round", zorder=5, label=path_label)
     reference = path_result.get("reference_path")
@@ -490,7 +433,7 @@ def plot_lowest_barrier_path(results: dict, path_result: dict,
             linestyle=":", linewidth=1.5, zorder=4,
             label="reference trajectory",
         )
-    if path_result.get("explicit_endpoints", False):
+    if mode != "fixed":
         nominal = np.asarray([
             path_result["nominal_start_xy"], path_result["nominal_end_xy"]
         ])
@@ -504,7 +447,7 @@ def plot_lowest_barrier_path(results: dict, path_result: dict,
             )
         ax.scatter(
             nominal[:, 0], nominal[:, 1], marker="x", c=PALETTE["guide"],
-            linewidths=1.5, s=55, zorder=6, label="requested endpoints",
+            linewidths=1.5, s=55, zorder=6, label="input endpoints",
         )
     ax.scatter(*path_result["start_xy"], c=PALETTE["sampling"], edgecolors="k", s=70,
                zorder=6, label="start")
@@ -517,8 +460,8 @@ def plot_lowest_barrier_path(results: dict, path_result: dict,
     ax.set_xlabel(f"{cvn[0]} ({cvu[0]})")
     ax.set_ylabel(f"{cvn[1]} ({cvu[1]})")
     ax.set_title(
-        "Lowest-barrier grid path" if mode == "search"
-        else f"Selected path ({mode})"
+        "Exact minimum-range grid path" if mode != "fixed"
+        else "Fixed reference path"
     )
     ax.legend(loc="best")
     _annotate(ax, f"TS candidate: {path_result['ts_xy'][0]:.2g} {cvu[0]}, "
@@ -574,7 +517,7 @@ def plot_lowest_barrier_path(results: dict, path_result: dict,
         )
 
     # Header block (matches the diagnostics figure so the two read as a set)
-    title = "2D GPR lowest-barrier path"
+    title = "2D GPR path analysis"
     if output_prefix:
         title = f"{title} — {output_prefix}"
     ell = np.atleast_1d(results["lengthscale"])
@@ -586,11 +529,6 @@ def plot_lowest_barrier_path(results: dict, path_result: dict,
         f"{metric[-1]:.3g} {cvu[1]})  ·  "
         f"path mode = {path_result.get('path_mode', 'search')}"
     )
-    if path_result.get("path_uncertainty_weight", 0.0) > 0:
-        setup += (
-            "  ·  UCB weight = "
-            f"{path_result['path_uncertainty_weight']:.3g}σ"
-        )
     fig.text(0.5, 0.965, title, ha="center", va="top",
              fontsize=13, fontweight="bold")
     fig.text(0.5, 0.925, setup, ha="center", va="top",

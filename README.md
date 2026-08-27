@@ -167,195 +167,128 @@ autocorrelation time; window-overlap ellipses, per-observation LOO z-scores,
 and the LOO calibration histogram). Pass `plot_diagnostics=False`
 (CLI: `--no-diagnostics`) to skip it.
 
-The 2D colour scale is anchored to the observation locations rather than to
-the most extreme grid cell. The plotted PMF is referenced to its minimum at a
-sampled window mean, and the normal colour range contains the full min--max
-range evaluated at all sampled means plus a 25% margin. Raw and calibrated
-uncertainty panels similarly include all values at window means plus 25%.
-Supported cells outside these display ranges are retained but colored red;
-cells outside sampled support remain blank. The intersection of sampled
-support and this non-red PMF range is the path-valid mask used for endpoint
-relocation, the complete minimax path, and transverse integration. A
-logarithmic PMF scale is deliberately avoided because free-energy differences
-and barriers are additive quantities and a log transform would distort them.
+The 2D colour scale and path-valid region use one shared, observation-anchored
+policy:
 
-By default, plots are restricted to the union of kernel-scaled neighborhoods
-around the sampled window means, while endpoint/path operations use its
-intersection with the non-red PMF range. `support_radius=0.5` (CLI:
-`--support-radius 0.5`) gives each neighborhood a radius of half the fitted or
-fixed GP lengthscale: a circle for an isotropic kernel and an axis-aligned
-ellipse with semiaxes `support_radius * lengthscale` for an anisotropic kernel.
-This local definition does not fill a convex hull or bridge unsampled gaps. Use
-`restrict_to_sampled_support=False` (CLI:
-`--no-restrict-to-sampled-support`) for a full rectangular geometric support;
-the non-red PMF path constraint still applies.
+- Geometric support is the union of circles or axis-aligned ellipses centred at
+  sampled window means. Their semiaxes are `support_radius * lengthscale`.
+- `support_radius=0.5` is the default. It is deliberately local: it does not
+  fill a convex hull or bridge disconnected groups of windows.
+- The normal PMF colour interval contains the complete PMF range evaluated at
+  window means plus a fixed 25% margin.
+- Cells outside geometric support are blank. Supported PMF values outside the
+  normal interval are red and excluded from path analysis.
+- The path-valid mask is finite PMF ∩ geometric support ∩ normal PMF interval.
+  No additional uncertainty cutoff is applied.
 
-Run the self-contained synthetic check (no simulation data needed):
+Use `--support-radius R` for data with different window spacing. The existing
+`--no-restrict-to-sampled-support` escape hatch restores rectangular geometric
+support, while the non-red PMF-range check remains active.
+
+Run the self-contained synthetic check with:
 
 ```bash
-python examples/run_synthetic_2d_demo.py   # reconstructs a known 2D PMF
+python examples/run_synthetic_2d_demo.py
 ```
 
-### Lowest-barrier paths and path-aligned marginal PMFs
+### Path analysis and path-aligned marginal PMFs
 
 #### At a glance
 
-- **Enable path analysis:** `--find-lowest-barrier-path`.
-- **Choose the allowed path region:**
-  - `--path-mode search` (default): search anywhere in the connected valid
-    sampled region; do not supply `--path-reference`.
-  - `--path-mode corridor --path-reference neb_xy.dat
-    --path-corridor-radius R`: search only in the valid region within `R` of
-    the supplied trajectory.
-  - `--path-mode fixed --path-reference neb_xy.dat`: perform no graph search;
-    evaluate the supplied trajectory directly.
-- **Choose the endpoints for `search` or `corridor`:**
-  - Omit `--path-endpoints`: choose suitable minima automatically.
-  - `--path-endpoints X0 Y0 X1 Y1` (default endpoint behavior): move each
-    requested point to the deepest nearby valid grid-local minimum.
-  - `--path-endpoint-radius R`: set the endpoint-minimum search radius in GP
-    lengthscales; the default is `--support-radius`.
-  - `--no-adjust-path-endpoints`: use the restraint-window centre nearest each
-    requested endpoint instead of moving to a minimum.
-  - `fixed` mode always uses the first and last reference-trajectory points and
-    does not accept `--path-endpoints`.
-- **Choose the primary path objective:**
-  - `--path-uncertainty-weight 0` (default): minimize the mean-PMF bottleneck.
-  - `--path-uncertainty-weight BETA`, with `BETA > 0`: minimize the
-    upper-confidence bottleneck `mean dF + BETA * sigma(dF)`; `BETA=1` gives a
-    one-sigma risk-aware search.
-  - Uncertainty weighting works with `search` and `corridor`, but not with a
-    fixed trajectory because there is no path to select in `fixed` mode.
-- **Choose among paths with the same optimal bottleneck:**
-  - `--path-gradient-weight 1` (default): prefer gradient-aligned, MEP-like
-    paths.
-  - `--path-gradient-weight 0`: prefer the geometrically shortest path.
-  - Other non-negative values tune the gradient-alignment penalty.
-- **Choose the path metric:**
-  - By default, each CV is scaled by its fitted or fixed GP lengthscale.
-  - `--path-metric-scales SCALE0 SCALE1` overrides those physical scales.
-  - `--path-corridor-radius` is dimensionless in this path metric; for isotropic
-    metric scale `ell`, physical radius `r` corresponds to `R = r / ell`.
-  - `--path-endpoint-radius` is always measured in the GP-lengthscale metric,
-    independently of `--path-metric-scales`.
-- **Optional path-aligned 1D PMF:**
-  - `--path-aligned-marginal --thermal-energy KBT` computes the transverse
-    Boltzmann marginal `A(s)`.
-  - `--perpendicular-points N` and `--perpendicular-width W` control its
-    transverse quadrature.
-- **Validity rule:** endpoint relocation, free/corridor searches, fixed-path
-  evaluation, and transverse integration all stay inside the sampled,
-  non-red `path_valid` region. Invalid or disconnected requests fail explicitly.
-- **Reported quantities:** the barrier is `max(path PMF) - min(path PMF)`;
-  reaction `dF` is end minus start; uncertainties use the full GP posterior
-  covariance between the relevant points.
+- **Free search:** `--path-mode search --path-endpoints X0 Y0 X1 Y1`
+  - Both endpoints are required.
+  - Each coordinate is snapped only to its nearest grid cell.
+  - Invalid, coincident, or disconnected endpoint cells are rejected.
+- **Reference corridor:** `--path-mode corridor --path-reference PATH
+  --path-corridor-radius R`
+  - The first and last reference points define the endpoints.
+  - Search is limited to the path-valid cells within `R` of the reference.
+- **Fixed trajectory:** `--path-mode fixed --path-reference PATH`
+  - No graph search is performed.
+  - The densified trajectory is evaluated directly and rejected if any part
+    leaves the path-valid region.
+- **Path metric:** fitted GP lengthscales by default; override with
+  `--path-metric-scales SCALE0 SCALE1`.
+- **Optional 1D marginal:** add `--path-aligned-marginal --thermal-energy KBT`.
+- **Reported barrier:** `max(path PMF) - min(path PMF)`, with uncertainty from
+  the full GP posterior covariance between those extrema.
 
-The following sections describe these choices and their numerical meaning in
-more detail.
+#### Free search
 
-By default, `find_lowest_barrier_path` finds the grid path whose highest PMF is
-as low as possible. It computes the exact minimax threshold, then minimizes an
-additive lengthscale-scaled path cost inside that exact sublevel set. The
-default `gradient_alignment_weight=1.0` (CLI: `--path-gradient-weight 1.0`)
-adds a weak-gradient-aware penalty for motion perpendicular to the predicted
-free-energy gradient. Set it to zero for the geometrically shortest minimax
-path.
+```bash
+gpr-umbrella-2d --colvar-dir COLVAR --kappa-dir COLVAR \
+    --find-lowest-barrier-path --path-mode search \
+    --path-endpoints X0 Y0 X1 Y1
+```
 
-Uncertainty-aware selection is opt-in. A positive `uncertainty_weight=beta`
-(CLI: `--path-uncertainty-weight BETA`) replaces the node score by the
-one-sided upper-confidence quantity
-`mean dF from start + beta * sigma(dF from start)`. The graph algorithm exactly
-minimizes the largest such score. `beta=1` is a one-sigma risk-aware path;
-`beta=0` preserves the mean-only result. This takes uncertainty into account
-when choosing the path, but does not integrate over uncertainty in which path
-is selected.
+Search and corridor modes find the narrowest PMF interval `[F_low, F_high]`
+that contains both endpoints and connects them through path-valid cells. This
+exactly minimizes `F_high - F_low` on the finite 8-neighbour grid. It is not a
+guarantee for the continuous GPR surface and is not a string or NEB refinement.
 
-The reported barrier is always `max(path PMF) - min(path PMF)`, with uncertainty
-from the full posterior covariance between those two points. Reaction ΔF
-remains end minus start. The searched bottleneck and secondary cost are exact
-on the finite 8-neighbor graph; they are not guarantees for the continuous GPR
-surface and do not constitute NEB/string refinement:
+Within that exact interval, one deterministic representative path minimizes
+lengthscale-scaled length with a fixed gradient-alignment penalty. Motion
+perpendicular to a reliable local GP gradient is penalized; the penalty fades
+where the predicted gradient is weak. There is no user-facing gradient weight
+or uncertainty/UCB path-selection parameter.
+
+Python usage follows the same contract:
 
 ```python
 from gpr_umbrella import find_lowest_barrier_path
 
 path = find_lowest_barrier_path(
-    res,
+    result,
     endpoints=((x_start, y_start), (x_end, y_end)),
 )
 ```
 
-Requested endpoints are relocated to the deepest grid-local minima within an
-elliptical neighborhood by default. The endpoint search uses the same
-lengthscale metric as sampled support and defaults to `support_radius`; set
-`endpoint_search_radius` (CLI: `--path-endpoint-radius`) independently when
-needed. Set `adjust_endpoints=False` (CLI:
-`--no-adjust-path-endpoints`) to skip the minimum search and instead use the
-restraint-window centre nearest each requested endpoint, snapped to the path
-grid. A selected window centre must snap into the path-valid region; otherwise
-the code stops with an actionable error rather than silently moving it. The
-window-centre mode requires explicit endpoints so the corresponding endpoint
-windows can be identified. Both selected endpoints must belong to the same
-connected path-valid component (sampled support intersected with the non-red,
-window-anchored PMF range). The complete minimum-bottleneck path may move
-anywhere in that component; disconnected endpoint neighborhoods produce an
-actionable error instead of silently crossing an invalid region.
+#### Reference trajectories
 
-A supplied two-column trajectory can either be enforced exactly or used as a
-soft corridor constraint:
+The reference file may contain `#` comments; its first two columns are the two
+CV coordinates.
 
 ```bash
-# Evaluate the supplied trajectory; no graph search is performed.
-gpr-umbrella-2d --colvar-dir COLVAR --kappa-dir COLVAR \
-    --find-lowest-barrier-path --path-mode fixed \
-    --path-reference neb_xy.dat
-
-# Search only near that trajectory.
+# Search only within a dimensionless path-metric radius of the reference.
 gpr-umbrella-2d --colvar-dir COLVAR --kappa-dir COLVAR \
     --find-lowest-barrier-path --path-mode corridor \
     --path-reference neb_xy.dat --path-corridor-radius 0.5
+
+# Evaluate the reference exactly, with no graph search.
+gpr-umbrella-2d --colvar-dir COLVAR --kappa-dir COLVAR \
+    --find-lowest-barrier-path --path-mode fixed \
+    --path-reference neb_xy.dat
 ```
 
-The reference file may contain comments beginning with `#`; its first two
-columns are the two CV coordinates. A fixed trajectory is densified for stable
-barrier evaluation and must remain inside the same trustworthy `path_valid`
-region used by the free search. Corridor mode intersects that valid region with
-a tube around the reference polyline. The radius is dimensionless in the path
-metric: with isotropic 0.5 A metric scales, radius 0.5 corresponds to 0.25 A.
-Disconnected corridors and invalid fixed trajectories fail explicitly.
+The corridor radius is dimensionless in the path metric. With isotropic metric
+scale 0.5 A, for example, radius 0.5 corresponds to 0.25 A. Disconnected
+corridors and invalid fixed trajectories fail explicitly instead of crossing,
+clipping, or rerouting through untrusted cells.
 
-The 2D CLI can find that path and optionally compute the path-aligned marginal
-PMF, `A(s)`, by Boltzmann-integrating the transverse coordinate `u` at each
-position along the path:
+#### Path-aligned 1D marginal
 
 ```bash
 gpr-umbrella-2d --colvar-dir COLVAR --kappa-dir COLVAR \
-    --find-lowest-barrier-path --path-aligned-marginal \
-    --thermal-energy 0.02585
+    --find-lowest-barrier-path --path-mode search \
+    --path-endpoints X0 Y0 X1 Y1 \
+    --path-aligned-marginal --thermal-energy 0.02585
 ```
 
-The value passed to `--thermal-energy` is `kBT` in the selected `energy_unit`.
-Path length and perpendicular directions are computed after scaling each CV by
-its own fitted GP lengthscale. Override those two physical scales with
-`--path-metric-scales SCALE0 SCALE1`; `SCALE0` is expressed in the first CV's
-unit and `SCALE1` in the second CV's unit. The resulting path coordinate `s`
-and transverse coordinate `u` are dimensionless metric arclengths.
-The marginal profile is written to `*_path_aligned_pmf_1d.dat`; the
-lowest-barrier path itself is written to `*_lowest_barrier_path.dat` and
-`*_lowest_barrier_path.png` when the corresponding outputs are enabled.
+`--thermal-energy` is `kBT` in `energy_unit`. The path coordinate and transverse
+coordinate are dimensionless metric arclengths. `--perpendicular-points` and
+`--perpendicular-width` control the transverse quadrature. Outputs are written
+to `*_lowest_barrier_path.dat`, `*_lowest_barrier_path.png`, and
+`*_path_aligned_pmf_1d.dat`.
 
 ### Path implementation structure
 
-The pathway contribution is split by responsibility to keep reviews local:
-
-- `path_graph.py` contains only the generic two-pass minimax/Dijkstra solver.
-- `trajectory.py` validates, densifies, and measures distances to reference paths.
+- `support.py` owns sampled-support geometry and the shared display/path-valid
+  policy.
+- `path_graph.py` owns exact finite-grid minimum-range search and the fixed
+  gradient-aware tie-break.
+- `trajectory.py` validates, densifies, and measures reference trajectories.
 - `path_profile.py` evaluates path PMFs and covariance-aware differences.
-- `pathways.py` orchestrates endpoints, validity masks, modes, and optional
-  transverse marginalization.
-
-The existing `find_lowest_barrier_path` entry point and default mean-only free
-search are preserved for compatibility.
+- `pathways.py` orchestrates modes and optional transverse marginalization.
 
 ## Citation
 

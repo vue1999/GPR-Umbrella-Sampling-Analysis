@@ -4,16 +4,15 @@ from __future__ import annotations
 import numpy as np
 import pytest
 from scipy.linalg import cho_factor, cho_solve
-from scipy.sparse import csr_matrix
-from scipy.sparse.csgraph import dijkstra
+from scipy.ndimage import label
 
 from gpr_umbrella.integration_2d import (
     _k_f_grad,
     _k_grad_grad,
     posterior_covariance_2d,
 )
+from gpr_umbrella.path_graph import minimum_energy_interval, minimum_range_path
 from gpr_umbrella.pathways import (
-    _minimax_path,
     _supported_segment,
     find_lowest_barrier_path,
     save_lowest_barrier_path,
@@ -89,27 +88,81 @@ def _analytic_results():
     }
 
 
-def test_minimax_tie_break_uses_the_matching_axis_step_lengths():
-    """Cheap x motion must win over the equal-barrier y-detour.
 
-    The two supported corridors have two diagonal steps apiece.  One adds two
-    axis-0 (x) steps and the other adds two axis-1 (y) steps, so swapping the
-    axial costs selects the opposite corridor.
-    """
-    support = np.array([
-        [1, 1, 1, 0],
-        [1, 0, 0, 1],
-        [1, 0, 1, 1],
-        [1, 1, 1, 0],
-    ], dtype=bool)
-    path = _minimax_path(
-        np.zeros((4, 4)), (0, 0), (2, 2),
-        dx_scaled=0.2, dy_scaled=2.0, support_mask=support,
+def _brute_minimum_interval(pmf, support, start, end):
+    levels = np.unique(pmf[support])
+    endpoint_low = min(pmf[start], pmf[end])
+    endpoint_high = max(pmf[start], pmf[end])
+    candidates = []
+    for lower in levels[levels <= endpoint_low]:
+        for upper in levels[levels >= endpoint_high]:
+            allowed = support & (pmf >= lower) & (pmf <= upper)
+            components, _ = label(allowed, structure=np.ones((3, 3), dtype=np.uint8))
+            if allowed[start] and components[start] == components[end]:
+                candidates.append((float(upper - lower), float(upper), -float(lower)))
+                break
+    if not candidates:
+        raise AssertionError("Test graph unexpectedly disconnects its endpoints")
+    width, upper, negative_lower = min(candidates)
+    return -negative_lower, upper, width
+
+
+def test_minimum_range_differs_from_minimum_peak():
+    pmf = np.full((3, 5), np.nan)
+    support = np.zeros_like(pmf, dtype=bool)
+    start, end = (1, 0), (1, 4)
+    support[start] = support[end] = True
+    pmf[start] = pmf[end] = 5.0
+    support[0, 1:4] = True
+    pmf[0, 1:4] = [-10.0, 6.0, 6.0]
+    support[2, 1:4] = True
+    pmf[2, 1:4] = 10.0
+
+    path, lower, upper = minimum_range_path(
+        pmf, start, end, 1.0, 1.0, support,
     )
 
-    axial_x = sum(a[0] != b[0] and a[1] == b[1] for a, b in zip(path, path[1:]))
-    axial_y = sum(a[0] == b[0] and a[1] != b[1] for a, b in zip(path, path[1:]))
-    assert (axial_x, axial_y) == (2, 0)
+    assert (lower, upper) == pytest.approx((5.0, 10.0))
+    assert all(index[0] != 0 for index in path)
+    assert max(pmf[index] for index in path) - min(pmf[index] for index in path) == 5.0
+
+
+@pytest.mark.parametrize("seed", range(12))
+def test_minimum_range_interval_matches_exhaustive_search(seed):
+    rng = np.random.default_rng(seed)
+    pmf = rng.normal(size=(4, 4))
+    support = rng.random((4, 4)) > 0.3
+    support[0, :] = True
+    support[:, -1] = True
+    start, end = (0, 0), (3, 3)
+
+    lower, upper, allowed = minimum_energy_interval(pmf, start, end, support)
+    expected_lower, expected_upper, expected_width = _brute_minimum_interval(
+        pmf, support, start, end
+    )
+
+    assert upper - lower == pytest.approx(expected_width)
+    assert upper == pytest.approx(expected_upper)
+    assert lower == pytest.approx(expected_lower)
+    assert allowed[start] and allowed[end]
+
+
+def test_fixed_gradient_alignment_is_secondary_to_exact_range():
+    pmf = np.zeros((5, 3))
+    support = np.zeros_like(pmf, dtype=bool)
+    support[:, 1:] = True
+    gradient = np.zeros(pmf.shape + (2,))
+    gradient[:, 1, 1] = 1.0
+    gradient[:, 2, 0] = 1.0
+    start, end = (0, 1), (4, 1)
+
+    path, lower, upper = minimum_range_path(
+        pmf, start, end, 1.0, 1.0, support, gradient_scaled=gradient,
+    )
+
+    assert (lower, upper) == (0.0, 0.0)
+    assert any(index[1] == 2 for index in path)
+    assert all(pmf[index] == 0.0 for index in path)
 
 
 @pytest.mark.parametrize(
@@ -123,42 +176,6 @@ def test_path_metric_scale_must_be_finite(metric_scale):
             endpoints=((-1.0, 0.0), (1.0, 0.0)),
             metric_scale=metric_scale,
         )
-
-
-def test_gradient_alignment_is_a_secondary_objective_after_exact_bottleneck():
-    pmf = np.zeros((5, 3))
-    support = np.zeros_like(pmf, dtype=bool)
-    support[:, 1:] = True
-    gradient = np.zeros(pmf.shape + (2,))
-    gradient[:, 1, 1] = 1.0
-    gradient[:, 2, 0] = 1.0
-    start, end = (0, 1), (4, 1)
-
-    shortest = _minimax_path(
-        pmf, start, end, 1.0, 1.0, support,
-        gradient_scaled=gradient, gradient_alignment_weight=0.0,
-    )
-    aligned = _minimax_path(
-        pmf, start, end, 1.0, 1.0, support,
-        gradient_scaled=gradient, gradient_alignment_weight=1.0,
-    )
-
-    assert all(index[1] == 1 for index in shortest)
-    assert any(index[1] == 2 for index in aligned)
-    assert max(pmf[index] for index in shortest) == 0.0
-    assert max(pmf[index] for index in aligned) == 0.0
-
-
-@pytest.mark.parametrize("weight", [-1.0, np.nan, np.inf, True])
-def test_gradient_alignment_weight_must_be_finite_and_non_negative(weight):
-    with pytest.raises(ValueError, match="finite and non-negative"):
-        find_lowest_barrier_path(
-            _analytic_results(),
-            endpoints=((-1.0, 0.0), (1.0, 0.0)),
-            gradient_alignment_weight=weight,
-        )
-
-
 def test_isolated_supported_normal_point_is_not_extended_into_extrapolation():
     coordinate = np.linspace(-1.0, 1.0, 5)
     points = np.column_stack([np.zeros(5), coordinate])
@@ -233,7 +250,6 @@ def test_path_aligned_marginal_requires_positive_thermal_energy(thermal_energy):
             results,
             endpoints=((-1.0, 0.0), (1.0, 0.0)),
             metric_scale=(1.0, 1.0),
-            gradient_alignment_weight=0.0,
             path_aligned_marginal=True,
             thermal_energy=thermal_energy,
             perpendicular_points=11,
@@ -315,25 +331,22 @@ def test_corner_stations_with_zero_normal_measure_are_omitted():
         results,
         endpoints=((-1.0, -1.0), (1.0, 1.0)),
         metric_scale=(1.0, 1.0),
-        gradient_alignment_weight=0.0,
         path_aligned_marginal=True,
         thermal_energy=0.4,
         perpendicular_points=31,
     )
     marginal = path["path_aligned_marginal"]
 
-    # A normal to the diagonal touches the square only at each corner, so A(s)
-    # is undefined at those two zero-measure stations. Interior stations remain
-    # well-defined and should be returned instead of failing the whole profile.
-    assert len(marginal["s"]) == len(path["s"]) - 2
-    assert marginal["s"][0] > path["s"][0]
-    assert marginal["s"][-1] < path["s"][-1]
+    # Boundary stations with a zero-measure normal interval are omitted, while
+    # all remaining stations stay finite. The fixed gradient-aware tie-break
+    # determines which endpoint geometry is encountered.
+    assert len(marginal["s"]) < len(path["s"])
     assert np.all(np.isfinite(marginal["pmf"]))
-    assert not np.allclose(
-        [marginal["x"][0], marginal["y"][0]], path["start_xy"]
-    )
-    assert not np.allclose(
-        [marginal["x"][-1], marginal["y"][-1]], path["end_xy"]
+    assert not (
+        np.allclose([marginal["x"][0], marginal["y"][0]], path["start_xy"])
+        and np.allclose(
+            [marginal["x"][-1], marginal["y"][-1]], path["end_xy"]
+        )
     )
 
 
@@ -412,214 +425,29 @@ def test_path_savers_keep_each_cv_unit_in_mixed_unit_headers(
         assert "kJ/mol" in header
 
 
-def test_requested_endpoints_move_to_deepest_supported_local_minima():
-    results = _analytic_results()
-    results["lengthscale"] = np.ones(2)
-    results["support_radius"] = 0.5
-    middle = int(np.argmin(np.abs(results["gy"])))
-    results["pmf"] = np.full_like(results["pmf"], 10.0)
-    results["pmf"][:, middle] = 2.0
-    start_index = int(np.argmin(np.abs(results["gx"] + 0.6)))
-    end_index = int(np.argmin(np.abs(results["gx"] - 0.6)))
-    results["pmf"][start_index, middle] = -2.0
-    results["pmf"][end_index, middle] = -1.0
 
-    path = find_lowest_barrier_path(
-        results,
-        endpoints=((-1.0, 0.0), (1.0, 0.0)),
-    )
 
-    assert path["nominal_start_xy"] == (-1.0, 0.0)
-    assert path["nominal_end_xy"] == (1.0, 0.0)
-    assert path["start_xy"] == pytest.approx((-0.6, 0.0))
-    assert path["end_xy"] == pytest.approx((0.6, 0.0))
-    assert path["start_endpoint"]["selection"] == "grid_local_minimum"
-    assert path["end_endpoint"]["selection"] == "grid_local_minimum"
-    assert path["endpoints_adjusted"] is True
-    assert path["endpoint_search_radius"] == pytest.approx(0.5)
-    path_indices = [
-        (int(np.argmin(np.abs(results["gx"] - x))),
-         int(np.argmin(np.abs(results["gy"] - y))))
-        for x, y in zip(path["x"], path["y"])
-    ]
-    assert all(results["support_mask"][index] for index in path_indices)
-
-def test_window_centre_mode_requires_explicit_endpoints():
+def test_search_requires_explicit_endpoints():
     with pytest.raises(ValueError, match="requires two explicit endpoints"):
-        find_lowest_barrier_path(_analytic_results(), adjust_endpoints=False)
+        find_lowest_barrier_path(_analytic_results())
 
 
-def test_endpoint_minimum_search_can_be_disabled_in_favor_of_window_centres(
-    tmp_path,
-):
+def test_requested_endpoints_only_snap_to_nearest_grid_cells():
     results = _analytic_results()
-    results["lengthscale"] = np.ones(2)
-    results["centers"] = np.array([
-        [-0.8, 0.0],
-        [0.0, 1.0],
-        [0.8, 0.0],
-    ])
-    middle = int(np.argmin(np.abs(results["gy"])))
-    results["pmf"] = np.full_like(results["pmf"], 10.0)
-    results["pmf"][:, middle] = 2.0
-    results["pmf"][2, middle] = -2.0
-    results["pmf"][-3, middle] = -1.0
-
     path = find_lowest_barrier_path(
         results,
-        endpoints=((-1.0, 0.0), (1.0, 0.0)),
-        adjust_endpoints=False,
+        endpoints=((-0.93, 0.07), (0.91, -0.08)),
     )
 
-    assert path["start_xy"] == pytest.approx((-0.8, 0.0))
-    assert path["end_xy"] == pytest.approx((0.8, 0.0))
-    assert path["start_endpoint"]["window_index"] == 0
-    assert path["end_endpoint"]["window_index"] == 2
-    assert path["start_endpoint"]["selection"] == "nearest_window_center"
-    assert path["end_endpoint"]["selection"] == "nearest_window_center"
-    assert path["endpoint_selection"] == "window_centre"
-    assert path["endpoints_adjusted"] is False
-    assert path["endpoint_search_radius"] is None
-
-    output = tmp_path / "window_centres_path.dat"
-    save_lowest_barrier_path(path, str(output))
-    header = output.read_text()
-    assert "endpoint selection = nearest restraint-window centres" in header
-    assert "window indices = (0, 2)" in header
-    assert "gradient weight = 1" in header
-    assert "gradient alignment: median |cos|" in header
+    assert path["nominal_start_xy"] == (-0.93, 0.07)
+    assert path["nominal_end_xy"] == (0.91, -0.08)
+    assert path["start_xy"] == pytest.approx((-1.0, 0.0))
+    assert path["end_xy"] == pytest.approx((1.0, 0.0))
+    assert path["start_endpoint"]["selection"] == "nearest_grid_cell"
+    assert path["end_endpoint"]["selection"] == "nearest_grid_cell"
 
 
-def test_window_centre_endpoint_must_be_path_valid():
-    results = _analytic_results()
-    results["centers"] = np.array([[-1.0, 0.0], [1.0, 0.0]])
-    results["path_valid_mask"] = results["support_mask"].copy()
-    start = (0, int(np.argmin(np.abs(results["gy"]))))
-    results["path_valid_mask"][start] = False
-
-    with pytest.raises(ValueError, match="window centre.*path-valid"):
-        find_lowest_barrier_path(
-            results,
-            endpoints=((-1.0, 0.0), (1.0, 0.0)),
-            adjust_endpoints=False,
-        )
-
-
-def _test_edge_weight(
-    gradient, start, end, di, dj, dx, dy, gradient_floor, alignment_weight,
-):
-    distance = float(np.hypot(di * dx, dj * dy))
-    if gradient is None or alignment_weight == 0.0:
-        return distance
-    local = 0.5 * (gradient[start] + gradient[end])
-    magnitude = float(np.linalg.norm(local))
-    direction = np.array([di * dx, dj * dy]) / distance
-    cosine = float(np.dot(local, direction) / max(magnitude, np.finfo(float).tiny))
-    sine_squared = max(0.0, 1.0 - min(1.0, cosine * cosine))
-    reliability = magnitude**2 / (magnitude**2 + gradient_floor**2)
-    return distance * (1.0 + alignment_weight * reliability * sine_squared)
-
-
-def _independent_graph_optimum(
-    pmf, support, start, end, dx, dy, gradient=None, alignment_weight=0.0,
-):
-    """Solve the discrete lexicographic objective via SciPy graph routines."""
-    shape = pmf.shape
-    node_count = pmf.size
-    start_flat = np.ravel_multi_index(start, shape)
-    end_flat = np.ravel_multi_index(end, shape)
-    steps = [
-        (-1, 0), (1, 0), (0, -1), (0, 1),
-        (-1, -1), (-1, 1), (1, -1), (1, 1),
-    ]
-    for threshold in np.unique(pmf[support]):
-        allowed = support & (pmf <= threshold)
-        if not allowed[start] or not allowed[end]:
-            continue
-        gradient_floor = 1.0
-        if gradient is not None:
-            typical = float(np.median(np.linalg.norm(gradient[allowed], axis=1)))
-            if typical > 0.0:
-                gradient_floor = 0.1 * typical
-        rows, columns, weights = [], [], []
-        for i, j in np.argwhere(allowed):
-            source = np.ravel_multi_index((i, j), shape)
-            for di, dj in steps:
-                ni, nj = i + di, j + dj
-                if 0 <= ni < shape[0] and 0 <= nj < shape[1] and allowed[ni, nj]:
-                    rows.append(source)
-                    columns.append(np.ravel_multi_index((ni, nj), shape))
-                    weights.append(_test_edge_weight(
-                        gradient, (i, j), (ni, nj), di, dj, dx, dy,
-                        gradient_floor, alignment_weight,
-                    ))
-        graph = csr_matrix((weights, (rows, columns)), shape=(node_count, node_count))
-        distances = dijkstra(graph, directed=True, indices=start_flat)
-        if np.isfinite(distances[end_flat]):
-            return float(threshold), float(distances[end_flat]), gradient_floor
-    raise AssertionError("Test support unexpectedly disconnects its endpoints")
-
-
-@pytest.mark.parametrize("seed", range(12))
-def test_minimax_path_matches_independent_global_graph_optimum(seed):
-    """Barrier and length are globally optimal on the finite 8-neighbor graph."""
-    rng = np.random.default_rng(seed)
-    pmf = rng.normal(size=(4, 4))
-    support = rng.random((4, 4)) > 0.25
-    support[0, :] = True
-    support[:, -1] = True
-    start, end = (0, 0), (3, 3)
-    dx, dy = 0.7, 1.3
-
-    path = _minimax_path(pmf, start, end, dx, dy, support)
-    returned_bottleneck = max(pmf[index] for index in path)
-    returned_length = sum(
-        np.hypot((b[0] - a[0]) * dx, (b[1] - a[1]) * dy)
-        for a, b in zip(path, path[1:])
-    )
-    expected_bottleneck, expected_length, _ = _independent_graph_optimum(
-        pmf, support, start, end, dx, dy
-    )
-
-    assert returned_bottleneck == pytest.approx(expected_bottleneck)
-    assert returned_length == pytest.approx(expected_length)
-
-
-@pytest.mark.parametrize("seed", range(6))
-def test_gradient_weighted_path_matches_independent_global_graph_optimum(seed):
-    rng = np.random.default_rng(100 + seed)
-    pmf = rng.normal(size=(4, 4))
-    support = rng.random((4, 4)) > 0.25
-    support[0, :] = True
-    support[:, -1] = True
-    gradient = rng.normal(size=pmf.shape + (2,))
-    start, end = (0, 0), (3, 3)
-    dx, dy, weight = 0.7, 1.3, 1.0
-
-    path = _minimax_path(
-        pmf, start, end, dx, dy, support,
-        gradient_scaled=gradient, gradient_alignment_weight=weight,
-    )
-    returned_bottleneck = max(pmf[index] for index in path)
-    expected_bottleneck, expected_cost, gradient_floor = (
-        _independent_graph_optimum(
-            pmf, support, start, end, dx, dy,
-            gradient=gradient, alignment_weight=weight,
-        )
-    )
-    returned_cost = sum(
-        _test_edge_weight(
-            gradient, a, b, b[0] - a[0], b[1] - a[1], dx, dy,
-            gradient_floor, weight,
-        )
-        for a, b in zip(path, path[1:])
-    )
-
-    assert returned_bottleneck == pytest.approx(expected_bottleneck)
-    assert returned_cost == pytest.approx(expected_cost)
-
-
-def test_path_avoids_cells_excluded_by_the_path_valid_mask():
+def test_path_avoids_cells_excluded_by_path_valid_mask():
     results = _analytic_results()
     middle = int(np.argmin(np.abs(results["gy"])))
     blocked = (len(results["gx"]) // 2, middle)
@@ -627,9 +455,7 @@ def test_path_avoids_cells_excluded_by_the_path_valid_mask():
     results["path_valid_mask"][blocked] = False
 
     path = find_lowest_barrier_path(
-        results,
-        endpoints=((-1.0, 0.0), (1.0, 0.0)),
-        adjust_endpoints=False,
+        results, endpoints=((-1.0, 0.0), (1.0, 0.0))
     )
     path_indices = [
         (int(np.argmin(np.abs(results["gx"] - x))),
@@ -640,62 +466,39 @@ def test_path_avoids_cells_excluded_by_the_path_valid_mask():
     assert all(results["path_valid_mask"][index] for index in path_indices)
 
 
-def test_disconnected_endpoint_neighborhoods_fail_with_actionable_error():
+def test_invalid_and_disconnected_endpoints_fail_explicitly():
     results = _analytic_results()
-    results["lengthscale"] = np.ones(2)
+    middle = int(np.argmin(np.abs(results["gy"])))
+    results["path_valid_mask"] = results["support_mask"].copy()
+    results["path_valid_mask"][0, middle] = False
+    with pytest.raises(ValueError, match="start endpoint.*outside"):
+        find_lowest_barrier_path(
+            results, endpoints=((-1.0, 0.0), (1.0, 0.0))
+        )
+
+    results = _analytic_results()
     support = np.zeros_like(results["pmf"], dtype=bool)
     support[:4, :] = True
     support[7:, :] = True
     results["support_mask"] = support
-
-    with pytest.raises(ValueError, match="same connected path-valid"):
+    with pytest.raises(ValueError, match="disconnected path-valid"):
         find_lowest_barrier_path(
-            results,
-            endpoints=((-1.0, 0.0), (1.0, 0.0)),
-            endpoint_search_radius=0.25,
+            results, endpoints=((-1.0, 0.0), (1.0, 0.0))
         )
 
 
-def test_uncertainty_weight_selects_lower_uncertainty_minimax_route(monkeypatch):
-    results = _analytic_results()
-
-    def synthetic_uncertainty(results, points, latent_variance, reference):
-        sigma = np.where(
-            (np.abs(points[:, 1]) < 0.1) & (np.abs(points[:, 0]) < 0.9),
-            2.0,
-            0.0,
+def test_coincident_endpoint_grid_cells_are_rejected():
+    with pytest.raises(ValueError, match="collapse to one grid point"):
+        find_lowest_barrier_path(
+            _analytic_results(), endpoints=((-1.0, 0.0), (-0.99, 0.01))
         )
-        sigma[reference] = 0.0
-        return sigma, sigma, sigma
-
-    monkeypatch.setattr(
-        "gpr_umbrella.pathways.relative_uncertainty", synthetic_uncertainty
-    )
-    common = dict(
-        endpoints=((-1.0, 0.0), (1.0, 0.0)),
-        adjust_endpoints=False,
-        gradient_alignment_weight=0.0,
-        metric_scale=(1.0, 1.0),
-    )
-    mean_path = find_lowest_barrier_path(results, **common)
-    risk_path = find_lowest_barrier_path(
-        results, uncertainty_weight=1.0, **common
-    )
-
-    np.testing.assert_allclose(mean_path["y"], 0.0)
-    assert np.max(np.abs(risk_path["y"])) >= 0.19
-    assert risk_path["path_uncertainty_weight"] == pytest.approx(1.0)
-    assert "upper_confidence" in risk_path["path_objective"]
 
 
-def test_corridor_path_stays_within_reference_radius():
+def test_corridor_uses_reference_endpoints_and_stays_inside_radius():
     results = _analytic_results()
     reference = np.array([[-1.0, 0.0], [1.0, 0.0]])
     path = find_lowest_barrier_path(
         results,
-        endpoints=((-1.0, 0.0), (1.0, 0.0)),
-        adjust_endpoints=False,
-        gradient_alignment_weight=0.0,
         metric_scale=(1.0, 1.0),
         reference_path=reference,
         path_mode="corridor",
@@ -703,6 +506,8 @@ def test_corridor_path_stays_within_reference_radius():
     )
 
     assert path["path_mode"] == "corridor"
+    assert path["nominal_start_xy"] == pytest.approx(reference[0])
+    assert path["nominal_end_xy"] == pytest.approx(reference[-1])
     assert path["max_reference_distance"] <= 0.21 + 1e-12
     assert np.max(np.abs(path["y"])) <= 0.21 + 1e-12
 
@@ -728,7 +533,7 @@ def test_fixed_reference_path_is_evaluated_without_grid_search():
                for x, y in zip(path["x"], path["y"]))
 
 
-def test_fixed_reference_path_must_remain_path_valid():
+def test_fixed_reference_path_must_remain_path_valid_between_vertices():
     results = _analytic_results()
     results["path_valid_mask"] = np.broadcast_to(
         np.abs(results["gy"])[None, :] < 0.3, results["pmf"].shape
@@ -742,10 +547,19 @@ def test_fixed_reference_path_must_remain_path_valid():
         )
 
 
-def test_reference_modes_reject_missing_or_disjoint_geometry():
+def test_reference_modes_validate_required_and_disallowed_inputs():
     results = _analytic_results()
+    reference = np.array([[-1.0, 0.0], [1.0, 0.0]])
     with pytest.raises(ValueError, match="requires reference_path"):
         find_lowest_barrier_path(results, path_mode="fixed")
+    with pytest.raises(ValueError, match="uses the reference trajectory endpoints"):
+        find_lowest_barrier_path(
+            results,
+            endpoints=((-1.0, 0.0), (1.0, 0.0)),
+            reference_path=reference,
+            path_mode="corridor",
+            corridor_radius=0.2,
+        )
     with pytest.raises(ValueError, match="does not overlap"):
         find_lowest_barrier_path(
             results,
@@ -754,11 +568,23 @@ def test_reference_modes_reject_missing_or_disjoint_geometry():
             corridor_radius=0.1,
             metric_scale=(1.0, 1.0),
         )
-    with pytest.raises(ValueError, match="cannot select among a fixed path"):
+    with pytest.raises(ValueError, match="only valid with corridor"):
         find_lowest_barrier_path(
             results,
-            reference_path=np.array([[-1.0, 0.0], [1.0, 0.0]]),
+            reference_path=reference,
             path_mode="fixed",
-            uncertainty_weight=1.0,
-            metric_scale=(1.0, 1.0),
+            corridor_radius=0.1,
         )
+
+
+def test_saved_path_header_describes_fixed_objective_without_weights(tmp_path):
+    path = find_lowest_barrier_path(
+        _analytic_results(), endpoints=((-1.0, 0.0), (1.0, 0.0))
+    )
+    output = tmp_path / "path.dat"
+    save_lowest_barrier_path(path, str(output))
+    header = output.read_text()
+    assert "minimum_pmf_range_then_fixed_gradient_aligned_cost" in header
+    assert "selected energy interval" in header
+    assert "gradient weight" not in header
+    assert "uncertainty weight" not in header
