@@ -92,6 +92,11 @@ For barrier sampling also supply `--reactant-interval LOW HIGH` and
 `--transition-interval LOW HIGH` in Å, chosen using the physical states. The
 reporting target `--max-barrier-std` never changes the fit to reduce an error.
 
+On DAIS, `/u/vueszter/work/projects/Desorption/GPR/run_arclength_1d.py` now delegates
+to this entry point. Use the isolated `.venv-robust-gpr/bin/python` beside it.
+Its previous approximate implementation is retained as
+`run_arclength_1d.legacy-20260906.py`. The wrapper is versioned under `examples/`.
+
 `source_campaign.json` and `neb_path_30_images.xyz` beside COLVAR inputs trigger
 an audit of atom order, cell and frozen atoms. Unverified provenance is flagged;
 differences require cross-Hamiltonian energies or consistently prepared new MD.

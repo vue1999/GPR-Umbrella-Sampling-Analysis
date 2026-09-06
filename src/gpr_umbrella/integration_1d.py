@@ -823,11 +823,9 @@ def reconstruct_pmf_1d(
         print(f"   Percent outside \u00b13 sigma: {100 * np.mean(np.abs(loo_z) > 3):.1f}%")
 
     # ------------------------------------------------------------------
-    # Post-hoc uncertainty calibration via the LOO z-score std.
-    # The GP's predictive std is multiplied by std(LOO z) so that the
-    # \u00b1\u03c3 bands have nominal 68% coverage on this dataset.  LOO and
-    # training-residual diagnostics intentionally stay on the raw GP
-    # so the histogram still tells the calibration story.
+    # Conservative post-hoc uncertainty inflation via max(1, LOO RMS).
+    # This does not guarantee nominal coverage or remedy a failed model.
+    # LOO and training diagnostics intentionally remain on the raw GP.
     # ------------------------------------------------------------------
     # Keep the raw GP uncertainties so plotting can show calibration impact.
     std_diff_raw  = std_diff.copy()
@@ -847,7 +845,7 @@ def reconstruct_pmf_1d(
             step += 1
             if verbose:
                 print(f"\n{step}. UNCERTAINTY CALIBRATION")
-                print(f"   LOO z-score std: {cal_factor:.3f}")
+                print(f"   Inflation factor max(1, LOO RMS): {cal_factor:.3f}")
                 print("   PMF and dF/dx uncertainties rescaled by this factor.")
 
     try:

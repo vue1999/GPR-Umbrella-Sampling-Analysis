@@ -304,7 +304,7 @@ def plot_diagnostics(results: dict, output_prefix: str | None = None) -> plt.Fig
     )
     if cal is not None:
         setup += (f"  ·  calibrated σ = GP σ × {cal:.2f}  "
-                  f"(scale factor = LOO z-score std)")
+                  f"(scale factor = max(1, LOO RMS))")
 
     fig.text(0.5, 0.975, title, ha="center", va="top",
              fontsize=13, fontweight="bold")
