@@ -143,7 +143,7 @@ def plot_diagnostics(results: dict, output_prefix: str | None = None) -> plt.Fig
     std_diff        = results["pmf_std"]
     deriv_mean_star = results["deriv_mean"]
     deriv_std       = results["deriv_std"]
-    x_train         = results["x_means"]
+    x_train         = results.get("observation_x", results["x_means"])
     y               = results["derivatives"]
     derivative_errors = results["derivative_errors"]
     x_means         = results["x_means"]
@@ -204,7 +204,7 @@ def plot_diagnostics(results: dict, output_prefix: str | None = None) -> plt.Fig
                 fmt="o", markersize=3.5, markerfacecolor="white",
                 markeredgecolor="#222", markeredgewidth=0.7,
                 ecolor="#222", elinewidth=0.7, capsize=0,
-                alpha=0.9, label="UI estimates ±2σ")
+                alpha=0.9, label=results.get("observation_label", "UI estimates ±2σ"))
     ax.axhline(0, color=PALETTE["guide"], linewidth=0.6, alpha=0.6)
     ax.set_xlabel(f"Reaction coordinate ({cv_unit})")
     ax.set_ylabel(f"dF/dx ({deriv_unit})")
@@ -220,7 +220,7 @@ def plot_diagnostics(results: dict, output_prefix: str | None = None) -> plt.Fig
 
     # Window sampling check --------------------------------------------
     ax = fig.add_subplot(gs[1, 0:2])
-    sample_se = np.sqrt(x_vars / n_samples)
+    sample_se = np.sqrt(x_vars / results.get("n_eff", n_samples))
     rc_lo, rc_hi = x_centers.min(), x_centers.max()
     pad = 0.03 * (rc_hi - rc_lo) if rc_hi > rc_lo else 0.1
     ref = np.array([rc_lo - pad, rc_hi + pad])
@@ -246,7 +246,7 @@ def plot_diagnostics(results: dict, output_prefix: str | None = None) -> plt.Fig
 
     # Autocorrelation time ---------------------------------------------
     ax = fig.add_subplot(gs[1, 4:6])
-    idx = np.arange(len(x_train))
+    idx = np.arange(len(tau_ints))
     ax.bar(idx, tau_ints, color=PALETTE["tau"], edgecolor="white", linewidth=0.4)
     ax.axhline(tau_ints.mean(), color=PALETTE["guide"], linestyle="--",
                linewidth=0.9, label=f"mean = {tau_ints.mean():.1f}")
@@ -263,7 +263,7 @@ def plot_diagnostics(results: dict, output_prefix: str | None = None) -> plt.Fig
     # Training residuals -----------------------------------------------
     ax = fig.add_subplot(gs[2, 0:2])
     _bar_with_ref_lines(ax, std_residuals, PALETTE["residual"])
-    ax.set_xlabel("Window index")
+    ax.set_xlabel(results.get("observation_index_label", "Window index"))
     ax.set_ylabel("Standardised residual")
     ax.set_title(f"Training residuals  (std = {std_residuals.std():.2f})")
 
@@ -271,9 +271,9 @@ def plot_diagnostics(results: dict, output_prefix: str | None = None) -> plt.Fig
     ax = fig.add_subplot(gs[2, 2:4])
     _bar_with_ref_lines(ax, loo_z, PALETTE["loo"])
     n_out = int(np.sum(np.abs(loo_z) > 2))
-    ax.set_xlabel("Window index")
+    ax.set_xlabel(results.get("observation_index_label", "Window index"))
     ax.set_ylabel("LOO z-score")
-    ax.set_title(f"Per-window LOO  ({n_out} outside ±2σ)")
+    ax.set_title(f"{results.get('loo_title', 'Per-window LOO')}  ({n_out} outside ±2σ)")
 
     # LOO z-score histogram (calibration check) ------------------------
     ax = fig.add_subplot(gs[2, 4:6])
@@ -294,6 +294,8 @@ def plot_diagnostics(results: dict, output_prefix: str | None = None) -> plt.Fig
     title = "GPR umbrella integration"
     if output_prefix:
         title = f"{title} — {output_prefix}"
+    if results.get("quality_status"):
+        title += f" [{results['quality_status']}]"
 
     setup = (
         f"{len(x_centers)} windows, "

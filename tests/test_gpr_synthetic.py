@@ -159,6 +159,8 @@ class TestSyntheticHarmonic:
         pmf_data = np.loadtxt(results["pmf_path"])
         assert pmf_data.shape[1] == 3
         assert pmf_data.shape[0] == 200  # default n_star
+        np.testing.assert_allclose(np.diag(results["pmf_covariance"]), results["pmf_std"]**2, atol=1e-10)
+        assert results["uncertainty_calibration_factor"] >= 1.0
 
 
 class TestEdgeCases:

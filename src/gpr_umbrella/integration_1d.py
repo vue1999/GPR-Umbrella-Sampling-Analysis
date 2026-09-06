@@ -461,7 +461,9 @@ def _fit_hyperparameters(
             True,
         )
 
-    ell_lower = ell_upper / 3000.0
+    # Sub-window lengthscales can fit isolated forces while reverting to a
+    # flat, spuriously certain PMF between them. They are not resolved data.
+    ell_lower = cv_range / max(len(x_train) - 1, 1)
     bounds: list[tuple[float, float]] = []
     if fixed_sigma_f is None:
         bounds.append((np.log(1e-3), np.log(1e3)))
@@ -560,6 +562,7 @@ def reconstruct_pmf_1d(
     save_outputs: bool = True,
     calibrate_uncertainty: bool = True,
     verbose: bool = True,
+    mean_error_method: str = "multiscale",
 ):
     """Run GPR umbrella integration.
 
@@ -657,6 +660,25 @@ def reconstruct_pmf_1d(
     # kappa is already in energy_unit / cv_unit^2
     derivatives = kappa_vals * (x_centers - x_means)
     derivative_errors_stat = kappa_vals * np.sqrt(x_vars / n_eff)
+    if mean_error_method not in ("multiscale", "acf"):
+        raise ValueError("mean_error_method must be 'multiscale' or 'acf'")
+    sampling_issues = []
+    if mean_error_method == "multiscale":
+        for i, positions in enumerate(all_positions):
+            variances = [x_vars[i] / n_eff[i]]
+            for blocks in (8, 16, 32, 64):
+                if len(positions) < blocks * 4:
+                    continue
+                means = np.array([part.mean() for part in np.array_split(positions, blocks)])
+                variances.append(float(means.var(ddof=1) / blocks))
+            variance = max(variances)
+            derivative_errors_stat[i] = abs(kappa_vals[i]) * np.sqrt(variance)
+            if variance > 0:
+                n_eff[i] = min(n_samples[i], x_vars[i] / variance)
+                tau_ints[i] = n_samples[i] / (2 * n_eff[i])
+            halves = np.array_split(positions, 2)
+            if abs(halves[1].mean() - halves[0].mean()) > 6 * np.sqrt(variance):
+                sampling_issues.append(f"time_split_drift_window_{i}")
 
     step += 1
     if verbose:
@@ -814,7 +836,9 @@ def reconstruct_pmf_1d(
 
     cal_factor: float | None = None
     if calibrate_uncertainty:
-        z_std = float(loo_z.std())
+        # Never shrink uncertainties. RMS also detects a systematic LOO offset
+        # that std(z) would erase. Scaling is not a model-selection pass.
+        z_std = max(1.0, float(np.sqrt(np.mean(loo_z**2))))
         if np.isfinite(z_std) and z_std > 0:
             cal_factor = z_std
             std_diff   = std_diff   * cal_factor
@@ -868,7 +892,23 @@ def reconstruct_pmf_1d(
         "pmf_std_raw": std_diff_raw,
         "pmf_f_std_raw": f_std_raw,
         "deriv_std_raw": deriv_std_raw,
+        "pmf_covariance_raw": cov_f - cov_f[:, [ref_idx]] - cov_f[[ref_idx], :] + cov_f[ref_idx, ref_idx],
+        "pmf_covariance": (cov_f - cov_f[:, [ref_idx]] - cov_f[[ref_idx], :] + cov_f[ref_idx, ref_idx]) * (cal_factor or 1.0)**2,
+        "mean_error_method": mean_error_method,
     }
+    quality_issues = list(sampling_issues)
+    if ell_opt < .99 * window_spacing:
+        quality_issues.append("unresolved_sub_window_lengthscale")
+    elif ell_opt <= 1.05 * window_spacing:
+        quality_issues.append("lengthscale_at_resolution_limit")
+    if np.sqrt(np.mean(loo_z**2)) > 2 or np.max(np.abs(loo_z)) > 4:
+        quality_issues.append("poor_raw_leave_one_out")
+    if not fit_ok:
+        quality_issues.append("hyperparameter_optimisation_failed")
+    results["quality_issues"] = quality_issues
+    results["quality_status"] = "UNRELIABLE" if quality_issues else "CONDITIONAL FIT"
+    if quality_issues:
+        warnings.warn("GPR quality checks failed: " + ", ".join(quality_issues), stacklevel=2)
 
     fig_path = None
     if plot:

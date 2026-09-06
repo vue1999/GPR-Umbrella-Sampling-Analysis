@@ -304,3 +304,10 @@ exploration + sampling (metadynamics biasing with an instantaneous-collective-fo
 gradient estimator, reconstructed with GPR):
 
 > L. Mones, N. Bernstein, and G. Csányi, "Exploration, Sampling, And Reconstruction of Free Energy Surfaces with Gaussian Process Regression," *J. Chem. Theory Comput.* **2016**, *12* (10), 5100–5110. [doi:10.1021/acs.jctc.6b00553](https://doi.org/10.1021/acs.jctc.6b00553)
+# Robust projected-path fitting
+
+For 2D-biased trajectories projected onto an ordered NEB, see
+[Robust arclength SE GPR](ROBUST_PATH_GPR.md). The new `gpr-umbrella-path`
+entry point retains the original 2D bias energies, uses correlated block
+uncertainties and resolution-aware SE fitting, and preserves the existing
+diagnostic plot style. A successful optimiser is not an acceptance criterion.
