@@ -1,10 +1,11 @@
 """Independent acceptance checks, never an optimiser-success synonym."""
+
 from __future__ import annotations
 
 import numpy as np
 
 
-def compare_profiles(profiles, *, tolerance=.05, uncertainty_target=.05):
+def compare_profiles(profiles, *, tolerance=0.05, uncertainty_target=0.05):
     """Gauge-aligned comparisons on common support, in the input energy unit.
 
     Absolute tolerances prevent huge uncertainty bands from making an unstable
@@ -26,15 +27,24 @@ def compare_profiles(profiles, *, tolerance=.05, uncertainty_target=.05):
         issues.append("profile_sensitivity_exceeds_tolerance")
     if max_uncertainty > uncertainty_target:
         issues.append("profile_uncertainty_exceeds_target")
-    return {"quality_issues": issues, "maximum_profile_spread": maximum_spread,
-            "maximum_profile_sigma": max_uncertainty, "profile_tolerance": tolerance,
-            "uncertainty_target": uncertainty_target, "common_support": [float(lo), float(hi)]}
+    return {
+        "quality_issues": issues,
+        "maximum_profile_spread": maximum_spread,
+        "maximum_profile_sigma": max_uncertainty,
+        "profile_tolerance": tolerance,
+        "uncertainty_target": uncertainty_target,
+        "common_support": [float(lo), float(hi)],
+    }
 
 
 def diagnostic_status(quality_issues):
     """A numerical fit is never declared a validated physical barrier."""
-    hard = [i for i in quality_issues if i not in
-            ("physical_barrier_basins_not_specified", "sensitivity_suite_required")]
+    hard = [
+        i
+        for i in quality_issues
+        if i
+        not in ("physical_barrier_basins_not_specified", "sensitivity_suite_required")
+    ]
     if hard:
         return "UNRELIABLE"
     if "sensitivity_suite_required" in quality_issues:

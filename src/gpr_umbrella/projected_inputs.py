@@ -5,17 +5,19 @@ physical Hamiltonian (including common walls) must be the same in all windows.
 Uncertainty is estimated by resampling contiguous blocks within each window;
 PyMBAR's independent-sample covariance is deliberately NOT used on MD frames.
 """
+
 from __future__ import annotations
 
-import numpy as np
 import hashlib
 import json
 import os
 import tempfile
 import warnings
 from pathlib import Path
-from scipy.special import logsumexp
+
+import numpy as np
 from scipy.sparse.csgraph import connected_components
+from scipy.special import logsumexp
 
 from .arclength import project_arclength
 
@@ -27,48 +29,112 @@ def unweighted_block_support(positions, edges, *, block_size, stride):
         raw = np.arange(0, len(pos), stride)
         ids = np.searchsorted(edges, np.asarray(pos)[::stride], side="right") - 1
         ids[np.asarray(pos)[::stride] == edges[-1]] = len(edges) - 2
-        blocks = [np.flatnonzero(raw // block_size == b) for b in np.unique(raw // block_size)]
-        if len(blocks) > 1 and len(blocks[-1]) < .5 * block_size / stride:
-            blocks[-2] = np.r_[blocks[-2], blocks[-1]]; blocks.pop()
-        histograms.extend([np.bincount(ids[b][(ids[b] >= 0) & (ids[b] < len(edges)-1)], minlength=len(edges)-1) for b in blocks])
+        blocks = [
+            np.flatnonzero(raw // block_size == b) for b in np.unique(raw // block_size)
+        ]
+        if len(blocks) > 1 and len(blocks[-1]) < 0.5 * block_size / stride:
+            blocks[-2] = np.r_[blocks[-2], blocks[-1]]
+            blocks.pop()
+        histograms.extend(
+            [
+                np.bincount(
+                    ids[b][(ids[b] >= 0) & (ids[b] < len(edges) - 1)],
+                    minlength=len(edges) - 1,
+                )
+                for b in blocks
+            ]
+        )
     counts = np.array(histograms, dtype=float)
-    return np.divide(counts.sum(axis=0)**2, np.sum(counts**2, axis=0),
-                     out=np.zeros(len(edges)-1), where=np.sum(counts**2, axis=0) > 0)
+    return np.divide(
+        counts.sum(axis=0) ** 2,
+        np.sum(counts**2, axis=0),
+        out=np.zeros(len(edges) - 1),
+        where=np.sum(counts**2, axis=0) > 0,
+    )
 
 
 def _weights_given_f(reduced_bias, counts, f):
-    log_denominator = logsumexp(np.log(counts)[:, None] + f[:, None] - reduced_bias, axis=0)
-    residual = -logsumexp(-reduced_bias-log_denominator, axis=1)-f
-    if np.max(np.abs(residual-residual[0])) > 1e-6:
+    log_denominator = logsumexp(
+        np.log(counts)[:, None] + f[:, None] - reduced_bias, axis=0
+    )
+    residual = -logsumexp(-reduced_bias - log_denominator, axis=1) - f
+    if np.max(np.abs(residual - residual[0])) > 1e-6:
         raise ValueError("MBAR state does not satisfy the requested tolerance")
     lw = -log_denominator
-    return lw-logsumexp(lw)
+    return lw - logsumexp(lw)
 
 
 def _mbar_weights(reduced_bias, counts, initial=None):
     from pymbar import MBAR
-    mbar = MBAR(reduced_bias, counts, initial_f_k=initial,
-                relative_tolerance=1e-9, maximum_iterations=10000,
-                solver_protocol="robust", verbose=False)
+
+    mbar = MBAR(
+        reduced_bias,
+        counts,
+        initial_f_k=initial,
+        relative_tolerance=1e-9,
+        maximum_iterations=10000,
+        solver_protocol="robust",
+        verbose=False,
+    )
     return mbar, _weights_given_f(reduced_bias, counts, mbar.f_k)
 
 
 def _histogram_free_energy(log_weights, s, edges, kbt):
     ids = np.searchsorted(edges, s, side="right") - 1
     ids[s == edges[-1]] = len(edges) - 2
-    log_mass = np.array([logsumexp(log_weights[ids == i]) for i in range(len(edges) - 1)])
+    log_mass = np.array(
+        [logsumexp(log_weights[ids == i]) for i in range(len(edges) - 1)]
+    )
     if not np.all(np.isfinite(log_mass)):
-        raise ValueError("Unsampled arclength bins: reduce bins or collect missing windows; no GP bridging allowed")
+        raise ValueError(
+            "Unsampled arclength bins: reduce bins or collect missing windows; no GP bridging allowed"
+        )
     f = -kbt * (log_mass - np.log(np.diff(edges)))
     return f - f[0], ids
 
 
-def prepare_projected_observations(trajectories, centers, kappas, vertices, *,
-                                   kbt, bins=None, stride=10, block_size=1000,
-                                   bootstraps=128, seed=2026,
-                                   ambiguity_distance=0.01, target_normal_kappa=0.,
-                                   profile_range=None, projection_method="soft",
-                                   smoothing_width=None, reweight_cache=None, progress=None):
+def _save_state_cache(path, states):
+    """Atomic, resumable checkpoint; every reused row is equation-verified."""
+    values = states.copy()
+    if path.is_file():
+        try:
+            with np.load(path, allow_pickle=False) as old:
+                previous = old["bootstrap_f"]
+                if previous.shape == values.shape:
+                    fill = ~np.all(np.isfinite(values), axis=1) & np.all(
+                        np.isfinite(previous), axis=1
+                    )
+                    values[fill] = previous[fill]
+        except (OSError, ValueError, KeyError):
+            pass
+    with tempfile.NamedTemporaryFile(
+        dir=path.parent, suffix=".npz", delete=False
+    ) as handle:
+        temporary = Path(handle.name)
+        np.savez_compressed(handle, bootstrap_f=values)
+    os.replace(temporary, path)
+
+
+def prepare_projected_observations(
+    trajectories,
+    centers,
+    kappas,
+    vertices,
+    *,
+    kbt,
+    bins=None,
+    stride=10,
+    block_size=1000,
+    bootstraps=128,
+    seed=2026,
+    ambiguity_distance=0.01,
+    target_normal_kappa=0.0,
+    profile_range=None,
+    projection_method="soft",
+    smoothing_width=None,
+    reweight_cache=None,
+    progress=None,
+):
     """All trajectory rows must already have burn-in removed.
 
     ``block_size`` and ``stride`` are in original stored-sample units. Thinning
@@ -84,64 +150,136 @@ def prepare_projected_observations(trajectories, centers, kappas, vertices, *,
     better supported by narrow ribbons, but must be labelled and reported.
     """
     trajectories = [np.asarray(q, float) for q in trajectories]
-    centers, kappas, vertices = [np.asarray(a, float) for a in (centers, kappas, vertices)]
-    if (len(trajectories) < 2 or centers.shape != (len(trajectories), 2)
-            or kappas.shape != centers.shape or not np.all(np.isfinite(centers))
-            or not np.all(np.isfinite(kappas)) or np.any(kappas <= 0)
-            or not np.isfinite(kbt) or kbt <= 0 or stride < 1 or block_size < stride
-            or bootstraps < 16):
+    centers, kappas, vertices = [
+        np.asarray(a, float) for a in (centers, kappas, vertices)
+    ]
+    if (
+        len(trajectories) < 2
+        or centers.shape != (len(trajectories), 2)
+        or kappas.shape != centers.shape
+        or not np.all(np.isfinite(centers))
+        or not np.all(np.isfinite(kappas))
+        or np.any(kappas <= 0)
+        or not np.isfinite(kbt)
+        or kbt <= 0
+        or stride < 1
+        or block_size < stride
+        or bootstraps < 16
+    ):
         raise ValueError("Invalid projected-umbrella inputs or sampling settings")
     if not np.isfinite(target_normal_kappa) or target_normal_kappa < 0:
         raise ValueError("Target normal restraint must be finite and nonnegative")
-    if any(q.ndim != 2 or q.shape[1] != 2 or len(q) < block_size * 8 or not np.all(np.isfinite(q)) for q in trajectories):
-        raise ValueError("Need finite 2D trajectories with at least eight time blocks per window")
-    projected = [project_arclength(q, vertices, ambiguity_distance=ambiguity_distance,
-                 method=projection_method, smoothing_width=smoothing_width) for q in trajectories]
-    center_projection = project_arclength(centers, vertices, ambiguity_distance=ambiguity_distance,
-                        method=projection_method, smoothing_width=smoothing_width)
+    if any(
+        q.ndim != 2
+        or q.shape[1] != 2
+        or len(q) < block_size * 8
+        or not np.all(np.isfinite(q))
+        for q in trajectories
+    ):
+        raise ValueError(
+            "Need finite 2D trajectories with at least eight time blocks per window"
+        )
+    if progress is not None:
+        progress(f"Projecting {sum(len(q) for q in trajectories)} original frames")
+    projected = [
+        project_arclength(
+            q,
+            vertices,
+            ambiguity_distance=ambiguity_distance,
+            method=projection_method,
+            smoothing_width=smoothing_width,
+        )
+        for q in trajectories
+    ]
+    center_projection = project_arclength(
+        centers,
+        vertices,
+        ambiguity_distance=ambiguity_distance,
+        method=projection_method,
+        smoothing_width=smoothing_width,
+    )
     path_length = projected[0]["vertex_s"][-1]
     bins = bins or 2 * len(centers)
     if bins < 4:
         raise ValueError("At least four histogram bins required")
     if bootstraps < 2 * bins:
-        raise ValueError("Use at least twice as many block bootstraps as histogram bins")
-    bounds = (0., path_length) if profile_range is None else tuple(profile_range)
+        raise ValueError(
+            "Use at least twice as many block bootstraps as histogram bins"
+        )
+    bounds = (0.0, path_length) if profile_range is None else tuple(profile_range)
     if len(bounds) != 2 or not np.all(np.isfinite(bounds)) or bounds[0] >= bounds[1]:
-        raise ValueError("Profile range must contain two finite increasing arclength bounds")
+        raise ValueError(
+            "Profile range must contain two finite increasing arclength bounds"
+        )
     edges = np.linspace(*bounds, bins + 1)
     q = np.concatenate([t[::stride] for t in trajectories])
     s = np.concatenate([p["s"][::stride] for p in projected])
     normal = np.concatenate([p["distance"][::stride] for p in projected])
-    reduced_target = .5 * target_normal_kappa / kbt * normal**2
+    reduced_target = 0.5 * target_normal_kappa / kbt * normal**2
+
     def target_weights(lw, indices=None):
         lw = lw - (reduced_target if indices is None else reduced_target[indices])
         return lw - logsumexp(lw)
+
     counts = np.array([len(t[::stride]) for t in trajectories])
-    reduced_bias = .5 / kbt * np.sum((q[None, :, :] - centers[:, None, :])**2 * kappas[:, None, :], axis=2)
-    cache_path = None; cached_f = None; cache_hits = 0
+    reduced_bias = (
+        0.5
+        / kbt
+        * np.sum(
+            (q[None, :, :] - centers[:, None, :]) ** 2 * kappas[:, None, :], axis=2
+        )
+    )
+    cache_path = None
+    cached_f = None
+    cache_hits = 0
     if reweight_cache is not None:
         digest = hashlib.sha256(reduced_bias.tobytes())
-        digest.update(json.dumps(["bias-bootstrap-v1", counts.tolist(), [len(t) for t in trajectories],
-                                  stride, block_size, bootstraps, seed]).encode())
+        digest.update(
+            json.dumps(
+                [
+                    "bias-bootstrap-v1",
+                    counts.tolist(),
+                    [len(t) for t in trajectories],
+                    stride,
+                    block_size,
+                    bootstraps,
+                    seed,
+                ]
+            ).encode()
+        )
         cache_root = Path(reweight_cache)
         cache_root.mkdir(parents=True, exist_ok=True)
-        cache_path = cache_root / (digest.hexdigest()+".npz")
+        cache_path = cache_root / (digest.hexdigest() + ".npz")
         if cache_path.is_file():
             try:
                 with np.load(cache_path, allow_pickle=False) as cache:
                     candidate = cache["bootstrap_f"]
-                    if candidate.shape == (bootstraps, len(counts)) and np.all(np.isfinite(candidate)):
-                        cached_f = candidate.copy()
+                    if candidate.shape == (bootstraps, len(counts)):
+                        valid_rows = np.all(np.isfinite(candidate), axis=1)
+                        missing_rows = np.all(np.isnan(candidate), axis=1)
+                        if np.all(valid_rows | missing_rows):
+                            cached_f = candidate.copy()
             except (OSError, ValueError, KeyError):
-                warnings.warn("Invalid reweighting cache; recomputing normalisations", stacklevel=2)
+                warnings.warn(
+                    "Invalid reweighting cache; recomputing normalisations",
+                    stacklevel=2,
+                )
+    if progress is not None:
+        progress(
+            f"Solving original 2D-bias normalisations for {len(q)} retained frames"
+        )
     mbar, log_weights = _mbar_weights(reduced_bias, counts)
     log_weights = target_weights(log_weights)
     overlap = mbar.compute_overlap()
     overlap_scalar = float(np.real_if_close(overlap["scalar"]))
     matrix = overlap["matrix"]
-    n_components, labels = connected_components((matrix + matrix.T) / 2 > 1e-3, directed=False)
+    n_components, labels = connected_components(
+        (matrix + matrix.T) / 2 > 1e-3, directed=False
+    )
     if n_components > 1:
-        raise ValueError(f"Disconnected window overlap ({n_components} components at threshold 0.001); relative free energies are not supported. Collect bridge windows.")
+        raise ValueError(
+            f"Disconnected window overlap ({n_components} components at threshold 0.001); relative free energies are not supported. Collect bridge windows."
+        )
     f, bin_ids = _histogram_free_energy(log_weights, s, edges, kbt)
     offsets = np.r_[0, np.cumsum(counts)]
     blocks = []
@@ -150,29 +288,46 @@ def prepare_projected_observations(trajectories, centers, kappas, vertices, *,
         ids = raw_indices // block_size
         window_blocks = [offsets[i] + np.flatnonzero(ids == b) for b in np.unique(ids)]
         # Merge a short remainder to avoid nearly empty blocks.
-        if len(window_blocks[-1]) < .5 * block_size / stride:
+        if len(window_blocks[-1]) < 0.5 * block_size / stride:
             window_blocks[-2] = np.r_[window_blocks[-2], window_blocks[-1]]
             window_blocks.pop()
         blocks.append(window_blocks)
     # Effective number of time blocks supporting each bin (weight concentration).
-    log_block_mass = np.array([[logsumexp(log_weights[b][bin_ids[b] == j]) for j in range(bins)]
-                              for window in blocks for b in window])
+    log_block_mass = np.array(
+        [
+            [logsumexp(log_weights[b][bin_ids[b] == j]) for j in range(bins)]
+            for window in blocks
+            for b in window
+        ]
+    )
     log_mass = logsumexp(log_block_mass, axis=0)
     block_ess = np.exp(2 * log_mass - logsumexp(2 * log_block_mass, axis=0))
-    unweighted_block_ess = unweighted_block_support([p["s"] for p in projected], edges,
-                                                   block_size=block_size, stride=stride)
+    unweighted_block_ess = unweighted_block_support(
+        [p["s"] for p in projected], edges, block_size=block_size, stride=stride
+    )
     relative_block_ess = block_ess / unweighted_block_ess
     rng = np.random.default_rng(seed)
     boot_f = []
     failed_bootstraps = 0
-    bootstrap_f = np.full((bootstraps, len(counts)), np.nan)
+    bootstrap_f = (
+        cached_f.copy()
+        if cached_f is not None
+        else np.full((bootstraps, len(counts)), np.nan)
+    )
+    if progress is not None:
+        progress(
+            f"Starting {bootstraps} block replicates; {np.all(np.isfinite(bootstrap_f), axis=1).sum()} cached states"
+        )
     for repeat in range(bootstraps):
-        window_indices = [np.concatenate([bs[i] for i in rng.integers(0, len(bs), len(bs))]) for bs in blocks]
+        window_indices = [
+            np.concatenate([bs[i] for i in rng.integers(0, len(bs), len(bs))])
+            for bs in blocks
+        ]
         indices = np.concatenate(window_indices)
         try:
             bias = reduced_bias[:, indices]
             sampled_counts = np.array([len(a) for a in window_indices])
-            if cached_f is not None:
+            if cached_f is not None and np.all(np.isfinite(cached_f[repeat])):
                 try:
                     lw = _weights_given_f(bias, sampled_counts, cached_f[repeat])
                     bootstrap_f[repeat] = cached_f[repeat]
@@ -188,23 +343,23 @@ def prepare_projected_observations(trajectories, centers, kappas, vertices, *,
             boot_f.append(bf)
         except (ValueError, np.linalg.LinAlgError):
             failed_bootstraps += 1
-        if progress is not None and (repeat + 1) % 16 == 0:
-            progress(f"block bootstrap {repeat + 1}/{bootstraps}")
-    if cache_path is not None and np.all(np.isfinite(bootstrap_f)):
-        # Atomic replacement permits independent target/projection jobs to share
-        # a cache. Every reused state is still checked against its bias matrix.
-        with tempfile.NamedTemporaryFile(dir=cache_path.parent, suffix=".npz", delete=False) as handle:
-            temporary = Path(handle.name)
-            np.savez_compressed(handle, bootstrap_f=bootstrap_f)
-        os.replace(temporary, cache_path)
+        if (repeat + 1) % 16 == 0:
+            if cache_path is not None:
+                _save_state_cache(cache_path, bootstrap_f)
+            if progress is not None:
+                progress(f"block bootstrap {repeat + 1}/{bootstraps}")
+    if cache_path is not None:
+        _save_state_cache(cache_path, bootstrap_f)
     if len(boot_f) < max(16, 2 * bins):
-        raise ValueError(f"Too many failed/empty-bin block bootstraps ({failed_bootstraps}); sampled support is insufficient")
+        raise ValueError(
+            f"Too many failed/empty-bin block bootstraps ({failed_bootstraps}); sampled support is insufficient"
+        )
     nodes = (edges[1:] + edges[:-1]) / 2
     operator = np.diff(np.eye(bins), axis=0) / np.diff(nodes)[:, None]
     bootstrap_values = np.array(boot_f) @ operator.T
     covariance = np.cov(bootstrap_values, rowvar=False)
     # Small, reported covariance shrinkage stabilises finite bootstrap estimates.
-    covariance = .98 * covariance + .02 * np.diag(np.diag(covariance))
+    covariance = 0.98 * covariance + 0.02 * np.diag(np.diag(covariance))
     issues = []
     if n_components > 1:
         issues.append("disconnected_window_overlap")
@@ -213,7 +368,7 @@ def prepare_projected_observations(trajectories, centers, kappas, vertices, *,
     # Eight 10-ps blocks cannot have ESS >=10, even for perfect IID sampling.
     # Check both absolute support and loss relative to the same block layout;
     # otherwise increasing block length automatically manufactures a failure.
-    if block_ess.min() < 4 or relative_block_ess.min() < .25:
+    if block_ess.min() < 4 or relative_block_ess.min() < 0.25:
         issues.append("low_effective_block_support")
     if failed_bootstraps:
         issues.append("failed_block_bootstraps")
@@ -221,23 +376,43 @@ def prepare_projected_observations(trajectories, centers, kappas, vertices, *,
     for i, p in enumerate(projected):
         fraction = float(np.mean(p["ambiguous"]))
         interior = p["vertex_s"][1:-1]
-        vertex_mass = float(np.mean(np.min(np.abs(p["s"][:, None]-interior), axis=1) < 1e-9)) if len(interior) else 0.
-        if vertex_mass > .01:
+        vertex_mass = (
+            float(np.mean(np.min(np.abs(p["s"][:, None] - interior), axis=1) < 1e-9))
+            if len(interior)
+            else 0.0
+        )
+        if vertex_mass > 0.01:
             issues.append(f"projection_vertex_point_mass_window_{i}")
-        if fraction > .01:
+        if fraction > 0.01:
             issues.append(f"ambiguous_projection_window_{i}")
-        projection_summary.append({"window": i, "center_s": float(center_projection["s"][i]),
-                                   "method": p["projection_method"], "smoothing_width_A": p["smoothing_width"],
-                                   "interior_vertex_mass_fraction": vertex_mass,
-                                   "mean_s": float(np.mean(p["s"])),
-                                   "distance_p95": float(np.quantile(p["distance"], .95)),
-                                   "ambiguous_fraction": fraction,
-                                   "outside_endpoint_fraction": float(np.mean((p["s"] < 0) | (p["s"] > path_length)))})
+        projection_summary.append(
+            {
+                "window": i,
+                "center_s": float(center_projection["s"][i]),
+                "method": p["projection_method"],
+                "smoothing_width_A": p["smoothing_width"],
+                "interior_vertex_mass_fraction": vertex_mass,
+                "mean_s": float(np.mean(p["s"])),
+                "distance_p95": float(np.quantile(p["distance"], 0.95)),
+                "ambiguous_fraction": fraction,
+                "outside_endpoint_fraction": float(
+                    np.mean((p["s"] < 0) | (p["s"] > path_length))
+                ),
+            }
+        )
     # First/last halves are independent convergence checks, not an error model.
     halves = []
     for half in (0, 1):
-        indices = np.concatenate([np.arange(offsets[i], offsets[i + 1])[slice(None, counts[i] // 2) if half == 0 else slice(counts[i] // 2, None)]
-                                  for i in range(len(counts))])
+        indices = np.concatenate(
+            [
+                np.arange(offsets[i], offsets[i + 1])[
+                    slice(None, counts[i] // 2)
+                    if half == 0
+                    else slice(counts[i] // 2, None)
+                ]
+                for i in range(len(counts))
+            ]
+        )
         half_counts = np.array([c // 2 if half == 0 else c - c // 2 for c in counts])
         _, lw = _mbar_weights(reduced_bias[:, indices], half_counts, mbar.f_k)
         lw = target_weights(lw, indices)
@@ -257,17 +432,35 @@ def prepare_projected_observations(trajectories, centers, kappas, vertices, *,
         shape_se = centered_boot.std(axis=0, ddof=1)
         if np.max(np.abs(diff) / np.maximum(2 * shape_se, 1e-12)) > 3:
             issues.append("time_split_nonstationarity")
-    return {"nodes": nodes, "operator": operator, "values": operator @ f,
-            "noise_covariance": covariance, "histogram_pmf": f,
-            "bootstrap_pmf": np.array(boot_f), "bin_edges": edges,
-            "block_ess": block_ess, "unweighted_block_ess": unweighted_block_ess,
-            "relative_block_ess": relative_block_ess, "overlap_matrix": matrix,
-            "overlap_scalar": overlap_scalar, "overlap_components": int(n_components),
-            "overlap_component_labels": labels.tolist(), "quality_issues": issues,
-            "projection_summary": projection_summary, "all_positions": [p["s"] for p in projected],
-            "center_s": center_projection["s"], "counts": counts,
-            "half_profiles": halves, "half_profile_difference_range": half_difference,
-            "block_size": block_size, "stride": stride, "bootstraps": bootstraps,
-            "projection_method": projection_method, "smoothing_width": center_projection["smoothing_width"],
-            "reweight_cache_hits": cache_hits,
-            "seed": seed, "covariance_shrinkage": .02, "failed_bootstraps": failed_bootstraps}
+    return {
+        "nodes": nodes,
+        "operator": operator,
+        "values": operator @ f,
+        "noise_covariance": covariance,
+        "histogram_pmf": f,
+        "bootstrap_pmf": np.array(boot_f),
+        "bin_edges": edges,
+        "block_ess": block_ess,
+        "unweighted_block_ess": unweighted_block_ess,
+        "relative_block_ess": relative_block_ess,
+        "overlap_matrix": matrix,
+        "overlap_scalar": overlap_scalar,
+        "overlap_components": int(n_components),
+        "overlap_component_labels": labels.tolist(),
+        "quality_issues": issues,
+        "projection_summary": projection_summary,
+        "all_positions": [p["s"] for p in projected],
+        "center_s": center_projection["s"],
+        "counts": counts,
+        "half_profiles": halves,
+        "half_profile_difference_range": half_difference,
+        "block_size": block_size,
+        "stride": stride,
+        "bootstraps": bootstraps,
+        "projection_method": projection_method,
+        "smoothing_width": center_projection["smoothing_width"],
+        "reweight_cache_hits": cache_hits,
+        "seed": seed,
+        "covariance_shrinkage": 0.02,
+        "failed_bootstraps": failed_bootstraps,
+    }

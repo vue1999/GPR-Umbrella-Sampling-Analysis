@@ -112,6 +112,10 @@ between binning, projection, and thermodynamic-target comparisons. Cache keys
 hash the full original bias matrix and sampling/resampling settings. Reused
 states are checked against the MBAR equations and files are replaced atomically.
 This accelerates preparation only; it does not reuse a GP fit or its diagnostics.
+Normalisations are checkpointed atomically every 16 bootstrap replicates, so an
+interrupted preparation can resume with the same input hash and seed. Missing
+replicates are recomputed; cached rows are still checked against their exact
+resampled bias equations. Existing completed output folders are never replaced.
 
 On DAIS, `/u/vueszter/work/projects/Desorption/GPR/run_arclength_1d.py` now delegates
 to this entry point. Use the isolated `.venv-robust-gpr/bin/python` beside it.
@@ -132,8 +136,18 @@ overwritten. Statistical/model failures are visible, not silently discarded.
 
 Run `examples/validate_path_campaigns.py` for the completed DAIS datasets. It
 varies binning, block length and thinning independently. Then run
-`examples/assess_path_sensitivity.py`, which also broadens GP priors and raises
-the minimum lengthscale before comparing gauge-aligned profiles.
+`examples/assess_path_sensitivity.py`, which also doubles the hyperparameter-grid
+resolution and broadens priors without excluding supported models. Raising the
+minimum lengthscale is additionally reported as a forced-prior stress test:
+it is included in acceptance only if it excludes at most 5% of the baseline
+posterior mass. A correct fit is not required to remain invariant when a prior
+deliberately excludes the models favoured by the data.
+
+For a final check against thinning artefacts, use `--full-frames` with the
+validation runner. Its baseline uses every stored frame and 10-ps blocks; it
+compares 2.5-ps blocks, stride 5, finer bins, and both coordinate widths.
+The separate `examples/assess_covariance_sensitivity.py` reports covariance
+shrinkages 0, 0.02, 0.05 and 0.1 without selecting the best-looking alternative.
 
 Current explicit reporting thresholds (not universal physical laws): raw LOO
 RMS <=2 and max |z| <=4; blocked-CV RMS <=3; at least 4 effective contributing

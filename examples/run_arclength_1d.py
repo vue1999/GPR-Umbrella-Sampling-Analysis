@@ -6,8 +6,9 @@ Use --help for the new arguments. In particular, supply the original 2D
 kappa and the former arbitrary first-1.5-Å reactant basin are not supported.
 This file can also live beside GPR-Umbrella-Sampling-Analysis on DAIS.
 """
-from pathlib import Path
+
 import sys
+from pathlib import Path
 
 here = Path(__file__).resolve().parent
 for source in (here.parent / "src", here / "GPR-Umbrella-Sampling-Analysis" / "src"):
@@ -16,7 +17,6 @@ for source in (here.parent / "src", here / "GPR-Umbrella-Sampling-Analysis" / "s
         break
 
 from gpr_umbrella.cli_path import main
-
 
 if __name__ == "__main__":
     main()
