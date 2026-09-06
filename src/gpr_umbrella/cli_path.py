@@ -176,6 +176,11 @@ def run(args):
         seed=args.seed,
         target_normal_kappa=getattr(args, "target_normal_kappa", 0.0),
         profile_range=getattr(args, "s_range", None),
+        bin_edges=(
+            np.loadtxt(args.bin_edges, ndmin=1)
+            if getattr(args, "bin_edges", None)
+            else None
+        ),
         projection_method=getattr(args, "projection_method", "soft"),
         smoothing_width=getattr(args, "smoothing_width", None),
         reweight_cache=getattr(args, "reweight_cache", None),
@@ -243,7 +248,7 @@ def run(args):
             "observation_x": (nodes[:-1] + nodes[1:]) / 2,
             "observation_label": "Reweighted interval slopes ±2σ",
             "observation_index_label": "Arclength interval index",
-            "loo_title": "Per-interval LOO",
+            "loo_title": "Model-averaged LOO",
             "derivatives": prepared["values"],
             "derivative_errors": np.sqrt(np.diag(prepared["noise_covariance"])),
             "training_std_residuals": result["training_residuals"]
@@ -284,6 +289,10 @@ def run(args):
         unweighted_block_ess=prepared["unweighted_block_ess"],
         relative_block_ess=prepared["relative_block_ess"],
         half_profiles=prepared["half_profiles"],
+        loo_predictive_quantile_z=result["loo_z"],
+        map_loo_z=result["map_loo_z"],
+        loo_means=result["loo_means"],
+        loo_stds=result["loo_stds"],
     )
     summary = {
         "status": status,
@@ -305,6 +314,10 @@ def run(args):
         "sigma_f_eV": result["sigma_f"],
         "loo_rms": float(np.sqrt(np.mean(result["loo_z"] ** 2))),
         "loo_max_abs": float(np.max(np.abs(result["loo_z"]))),
+        "loo_method": result["loo_method"],
+        "map_loo_rms": float(np.sqrt(np.mean(result["map_loo_z"] ** 2))),
+        "map_loo_max_abs": float(np.max(np.abs(result["map_loo_z"]))),
+        "map_blocked_cv_rms": result["map_blocked_cv_rms"],
         "blocked_cv_rms": result["blocked_cv_rms"],
         "overlap_components": prepared["overlap_components"],
         "overlap_scalar": prepared["overlap_scalar"],
@@ -376,6 +389,10 @@ def main():
         help="Explicit alternative target: common harmonic distance-to-path restraint in eV/Å²; default 0 unrestrained",
     )
     parser.add_argument("--bins", type=int)
+    parser.add_argument(
+        "--bin-edges",
+        help="Optional explicit nonuniform arclength bin-edge file; enables local endpoint refinement",
+    )
     parser.add_argument(
         "--projection-method", choices=("soft", "polyline"), default="soft"
     )

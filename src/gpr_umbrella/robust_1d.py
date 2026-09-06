@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import numpy as np
 from scipy.linalg import cho_factor, cho_solve
-from scipy.special import logsumexp
+from scipy.special import log_ndtr, logsumexp, ndtri_exp
 
 from .integration_1d import k_base, k_f_fprime
 
@@ -17,6 +17,79 @@ from .integration_1d import k_base, k_f_fprime
 def covariance_reference(cov, reference=0):
     cov = np.asarray(cov)
     return cov - cov[:, [reference]] - cov[[reference], :] + cov[reference, reference]
+
+
+def _predictive_checks(values, precisions, log_evidence):
+    """Exact leave-out hyperparameter weights on the declared fixed grid.
+
+    p(theta | y_without_hold) is proportional to p(theta | y) divided by
+    p(y_hold | y_without_hold, theta). This uses the full correlated observation
+    covariance, not an IID-noise shortcut. One-point scores are predictive-CDF
+    normal quantiles (PIT z), not a Gaussian approximation to a mixture tail.
+    Block scores standardise residuals by the full mixture covariance; they
+    are diagnostic Mahalanobis RMS values, not calibrated p-values.
+    """
+    precisions = np.asarray(precisions)
+    values = np.asarray(values)
+    alpha = np.einsum("cij,j->ci", precisions, values)
+    variance = 1 / np.diagonal(precisions, axis1=1, axis2=2)
+    means = values[None] - alpha * variance
+    z = alpha * np.sqrt(variance)
+    conditional_logp = -0.5 * (z * z + np.log(2 * np.pi * variance))
+    log_weights = log_evidence[:, None] - conditional_logp
+    log_weights -= logsumexp(log_weights, axis=0)[None]
+    weights = np.exp(log_weights)
+    mean = np.sum(weights * means, axis=0)
+    mixture_variance = np.sum(weights * (variance + (means - mean) ** 2), axis=0)
+    log_cdf = logsumexp(log_weights + log_ndtr(z), axis=0)
+    log_survival = logsumexp(log_weights + log_ndtr(-z), axis=0)
+    pit_z = np.where(
+        log_cdf < np.log(0.5), ndtri_exp(log_cdf), -ndtri_exp(log_survival)
+    )
+    best = int(np.argmax(log_evidence))
+    blocked = []
+    map_blocked = []
+    block_logp = []
+    for hold in np.array_split(
+        np.arange(len(values)), min(8, max(2, len(values) // 3))
+    ):
+        precision = precisions[:, hold, :][:, :, hold]
+        covariance = np.linalg.inv(precision)
+        residual = np.einsum("cij,cj->ci", covariance, alpha[:, hold])
+        conditional_mean = values[hold] - residual
+        squared = np.einsum("ci,cij,cj->c", residual, precision, residual)
+        conditional = -0.5 * (
+            squared + len(hold) * np.log(2 * np.pi) - np.linalg.slogdet(precision)[1]
+        )
+        lw = log_evidence - conditional
+        lw -= logsumexp(lw)
+        w = np.exp(lw)
+        m = np.sum(w[:, None] * conditional_mean, axis=0)
+        difference = conditional_mean - m
+        c = np.sum(
+            w[:, None, None]
+            * (covariance + difference[:, :, None] * difference[:, None, :]),
+            axis=0,
+        )
+        r = values[hold] - m
+        blocked.append(float(np.sqrt(max(r @ np.linalg.solve(c, r), 0) / len(hold))))
+        map_blocked.append(float(np.sqrt(max(squared[best], 0) / len(hold))))
+        block_logp.append(float(logsumexp(lw + conditional)))
+    return {
+        "loo_means": mean,
+        "loo_stds": np.sqrt(mixture_variance),
+        "loo_z": pit_z,
+        "loo_standardized_residuals": (values - mean) / np.sqrt(mixture_variance),
+        "loo_hyperparameter_weights": weights,
+        "loo_log_predictive_density": logsumexp(log_weights + conditional_logp, axis=0),
+        "map_loo_means": means[best],
+        "map_loo_stds": np.sqrt(variance[best]),
+        "map_loo_z": z[best],
+        "blocked_cv_rms": blocked,
+        "map_blocked_cv_rms": map_blocked,
+        "blocked_log_predictive_density": block_logp,
+        "loo_method": "Predictive-quantile z; fold-specific hyperparameter mixture on a fixed grid",
+    }
 
 
 def fit_linear_observations(
@@ -101,6 +174,7 @@ def fit_linear_observations(
         ):
             raise ValueError("Use log-uniform hyperparameter grids")
     records = []
+    precisions = []
     jitter = np.mean(np.diag(noise)) * 1e-9
     for ell in lengthscales:
         base = operator @ k_base(nodes, nodes, 1.0, ell) @ operator.T
@@ -129,12 +203,14 @@ def fit_linear_observations(
                     float(np.max(np.abs(loo_z))),
                 )
             )
+            precisions.append(inv)
     if not records:
         raise ValueError("No numerically valid GP candidate")
     table = np.array(records)
     log_weight = -table[:, 2]
     weights = np.exp(log_weight - logsumexp(log_weight))
     best = int(np.argmax(weights))
+    predictive = _predictive_checks(values, precisions, log_weight)
     # Retain effectively all mass; avoid hundreds of negligible dense matrices.
     selected = np.flatnonzero(weights > weights.max() * 1e-5)
     weights_retained = weights[selected] / weights[selected].sum()
@@ -142,6 +218,7 @@ def fit_linear_observations(
     second = np.zeros((len(grid), len(grid)))
     dmean = np.zeros(len(grid))
     dsecond = np.zeros(len(grid))
+    training_mean = np.zeros(n)
     components = []
     best_result = None
     for idx, weight in zip(selected, weights_retained):
@@ -165,6 +242,7 @@ def fit_linear_observations(
         second += weight * (fc + np.outer(fm, fm))
         dmean += weight * dm
         dsecond += weight * (np.maximum(dv, 0) + dm**2)
+        training_mean += weight * (kernel @ alpha)
         components.append(
             {
                 "weight": float(weight),
@@ -177,10 +255,7 @@ def fit_linear_observations(
         if idx == best:
             loo_var = 1 / np.diag(inv)
             best_result = {
-                "loo_means": values - alpha * loo_var,
-                "loo_stds": np.sqrt(loo_var),
-                "loo_z": alpha * np.sqrt(loo_var),
-                "training_residuals": values - kernel @ alpha,
+                "map_training_residuals": values - kernel @ alpha,
                 "pmf_std_raw": np.sqrt(np.maximum(np.diag(fc), 0)),
             }
     covariance = second - np.outer(mean, mean)
@@ -198,23 +273,12 @@ def fit_linear_observations(
         issues.append("lengthscale_prior_boundary")
     if len(amplitudes) > 1 and amplitude_boundary_mass > 0.2:
         issues.append("amplitude_prior_boundary")
-    if table[best, 3] > 2 or table[best, 4] > 4:
+    if (
+        np.sqrt(np.mean(predictive["loo_z"] ** 2)) > 2
+        or np.max(np.abs(predictive["loo_z"])) > 4
+    ):
         issues.append("poor_raw_leave_one_out")
-    # Joint conditional checks of adjacent held-out intervals, not only LOO.
-    ell, amplitude = table[best, :2]
-    ky = (
-        operator @ k_base(nodes, nodes, amplitude, ell) @ operator.T
-        + noise
-        + np.eye(n) * jitter
-    )
-    inv = cho_solve(cho_factor(ky, lower=True), np.eye(n))
-    alpha = inv @ values
-    blocked = []
-    for hold in np.array_split(np.arange(n), min(8, max(2, n // 3))):
-        precision = inv[np.ix_(hold, hold)]
-        residual = np.linalg.solve(precision, alpha[hold])
-        blocked.append(float(np.sqrt(residual @ precision @ residual / len(hold))))
-    if max(blocked) > 3:
+    if max(predictive["blocked_cv_rms"]) > 3:
         issues.append("poor_blocked_cross_validation")
     return {
         "x_star": grid,
@@ -237,11 +301,12 @@ def fit_linear_observations(
         ],
         "components": components,
         "quality_issues": issues,
-        "blocked_cv_rms": blocked,
+        "training_residuals": values - training_mean,
         "lengthscale_boundary_mass": boundary_mass,
         "amplitude_boundary_mass": amplitude_boundary_mass,
         "retained_hyperparameter_mass": float(weights[selected].sum()),
         **best_result,
+        **predictive,
     }
 
 

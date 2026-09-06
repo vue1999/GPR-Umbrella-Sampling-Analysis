@@ -9,6 +9,87 @@ from gpr_umbrella.robust_1d import (
 )
 
 
+def test_model_averaged_leaveout_matches_explicit_conditioning():
+    from scipy.special import logsumexp, ndtr
+
+    from gpr_umbrella.integration_1d import k_base
+
+    nodes = np.linspace(-1.0, 1.0, 7)
+    operator = np.diff(np.eye(7), axis=0) / np.diff(nodes)[:, None]
+    values = 0.2 * np.sin(np.arange(6.0))
+    noise = 0.02**2 * (np.eye(6) + 0.2 * np.ones((6, 6)))
+    fit = fit_linear_observations(
+        nodes,
+        operator,
+        values,
+        noise,
+        nodes,
+        lengthscales=[0.4, 0.9],
+        amplitudes=[0.2, 0.6],
+    )
+    for held in (np.array([3]), np.arange(3)):
+        rest = np.setdiff1d(np.arange(6), held)
+        means = []
+        covariances = []
+        log_evidence = []
+        for ell, amplitude in fit["hyperparameter_table"][:, :2]:
+            cov = operator @ k_base(nodes, nodes, amplitude, ell) @ operator.T + noise
+            cov += np.eye(6) * np.mean(np.diag(noise)) * 1e-9
+            train = cov[np.ix_(rest, rest)]
+            cross = cov[np.ix_(held, rest)]
+            means.append(cross @ np.linalg.solve(train, values[rest]))
+            covariances.append(
+                cov[np.ix_(held, held)] - cross @ np.linalg.solve(train, cross.T)
+            )
+            log_evidence.append(
+                -0.5
+                * (
+                    values[rest] @ np.linalg.solve(train, values[rest])
+                    + np.linalg.slogdet(train)[1]
+                    + len(rest) * np.log(2 * np.pi)
+                )
+            )
+        means, covariances = np.array(means), np.array(covariances)
+        weights = np.exp(np.array(log_evidence) - logsumexp(log_evidence))
+        mean = np.sum(weights[:, None] * means, axis=0)
+        delta = means - mean
+        covariance = np.sum(
+            weights[:, None, None]
+            * (covariances + delta[:, :, None] * delta[:, None, :]),
+            axis=0,
+        )
+        if len(held) == 1:
+            i = held[0]
+            np.testing.assert_allclose(
+                fit["loo_hyperparameter_weights"][:, i], weights, rtol=1e-8, atol=1e-10
+            )
+            np.testing.assert_allclose(fit["loo_means"][i], mean[0], rtol=1e-8)
+            np.testing.assert_allclose(
+                fit["loo_stds"][i] ** 2, covariance[0, 0], rtol=1e-8
+            )
+            probability = np.sum(
+                weights
+                * ndtr((values[i] - means[:, 0]) / np.sqrt(covariances[:, 0, 0]))
+            )
+            np.testing.assert_allclose(ndtr(fit["loo_z"][i]), probability, rtol=1e-8)
+        else:
+            residual = values[held] - mean
+            expected = np.sqrt(
+                residual @ np.linalg.solve(covariance, residual) / len(held)
+            )
+            np.testing.assert_allclose(fit["blocked_cv_rms"][0], expected, rtol=1e-8)
+
+
+def test_predictive_quantiles_do_not_clip_extreme_failures():
+    from gpr_umbrella.robust_1d import _predictive_checks
+
+    result = _predictive_checks(
+        np.array([0.0, 40.0, -40.0]), np.array([np.eye(3)]), np.zeros(1)
+    )
+    np.testing.assert_allclose(result["loo_z"], [0.0, 40.0, -40.0], atol=1e-10)
+    np.testing.assert_allclose(result["loo_z"], result["map_loo_z"], atol=1e-10)
+
+
 def test_endpoint_rays_not_clipped():
     p = project_arclength([[-0.2, 0.1], [1.3, -0.1]], [[0, 0], [1, 0]])
     np.testing.assert_allclose(p["s"], [-0.2, 1.3])
@@ -317,7 +398,7 @@ def test_original_bias_reweighting_recovers_straight_path_marginal(tmp_path):
         block_size=80,
         bootstraps=32,
         target_normal_kappa=10.0,
-        profile_range=(-0.25, 3.25),
+        bin_edges=np.r_[np.linspace(-0.25, 0.5, 5), np.linspace(0.5, 3.25, 9)[1:]],
         reweight_cache=tmp_path / "cache",
     )
     assert confined["nodes"][0] < 0 and confined["nodes"][-1] > 3

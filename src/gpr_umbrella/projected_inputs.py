@@ -130,6 +130,7 @@ def prepare_projected_observations(
     ambiguity_distance=0.01,
     target_normal_kappa=0.0,
     profile_range=None,
+    bin_edges=None,
     projection_method="soft",
     smoothing_width=None,
     reweight_cache=None,
@@ -211,19 +212,40 @@ def prepare_projected_observations(
         smoothing_width=smoothing_width,
     )
     path_length = projected[0]["vertex_s"][-1]
-    bins = bins or 2 * len(centers)
+    if bin_edges is not None:
+        edges = np.asarray(bin_edges, dtype=float)
+        if (
+            edges.ndim != 1
+            or len(edges) < 5
+            or not np.all(np.isfinite(edges))
+            or np.any(np.diff(edges) <= 0)
+        ):
+            raise ValueError(
+                "Explicit bin edges must be finite and strictly increasing (at least four bins)"
+            )
+        if profile_range is not None or (bins is not None and bins != len(edges) - 1):
+            raise ValueError(
+                "Explicit bin edges conflict with the requested range/bin count"
+            )
+        bins = len(edges) - 1
+    else:
+        bins = 2 * len(centers) if bins is None else bins
+        bounds = (0.0, path_length) if profile_range is None else tuple(profile_range)
+        if (
+            len(bounds) != 2
+            or not np.all(np.isfinite(bounds))
+            or bounds[0] >= bounds[1]
+        ):
+            raise ValueError(
+                "Profile range must contain two finite increasing arclength bounds"
+            )
+        edges = np.linspace(*bounds, bins + 1)
     if bins < 4:
         raise ValueError("At least four histogram bins required")
     if bootstraps < 2 * bins:
         raise ValueError(
             "Use at least twice as many block bootstraps as histogram bins"
         )
-    bounds = (0.0, path_length) if profile_range is None else tuple(profile_range)
-    if len(bounds) != 2 or not np.all(np.isfinite(bounds)) or bounds[0] >= bounds[1]:
-        raise ValueError(
-            "Profile range must contain two finite increasing arclength bounds"
-        )
-    edges = np.linspace(*bounds, bins + 1)
     q = np.concatenate([t[::stride] for t in trajectories])
     s = np.concatenate([p["s"][::stride] for p in projected])
     normal = np.concatenate([p["distance"][::stride] for p in projected])
