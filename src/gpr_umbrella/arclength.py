@@ -46,8 +46,8 @@ def validate_path(vertices):
     return vertices, delta, lengths
 
 
-def project_arclength(points, vertices, *, ambiguity_distance=0.01,
-                      branch_separation=None, chunk_size=2048):
+def project_polyline(points, vertices, *, ambiguity_distance=0.01,
+                     branch_separation=None, chunk_size=2048):
     """Return s, transverse distances, segment IDs and remote-branch ambiguity.
 
     All coordinates must use the same, explicitly chosen metric/units.
@@ -88,3 +88,73 @@ def project_arclength(points, vertices, *, ambiguity_distance=0.01,
     result = {key: np.concatenate(value) for key, value in output.items()}
     result["vertex_s"] = cumulative
     return result
+
+
+def project_arclength(points, vertices, *, ambiguity_distance=0.01,
+                      branch_separation=None, chunk_size=2048,
+                      smoothing_width=None, method="soft"):
+    """Smooth path progress in physical-arclength units.
+
+    The coordinate is the Gaussian-weighted mean of s over the *continuous*
+    reference polyline, with analytically integrated infinite endpoint rays:
+    s(q) = integral s exp(-|q-r(s)|²/(2h²)) ds / integral exp(...) ds.
+
+    This is a continuous-path analogue of a soft path collective variable.
+    It equals geometric projection on a straight line, but has no finite-area
+    point masses at polygon corners. It is not exactly nearest-point arclength
+    on a bent path; h is an explicit, geometry-based coordinate definition.
+    The original 2D energies must still be used for unbiasing. Normal distance
+    remains distance to the geometric path. Window IDs never enter the map.
+    """
+    from scipy.special import log_ndtr, logsumexp
+    hard = project_polyline(points, vertices, ambiguity_distance=ambiguity_distance,
+                            branch_separation=branch_separation, chunk_size=chunk_size)
+    if method == "polyline":
+        hard["projection_method"] = "polyline"
+        hard["smoothing_width"] = 0.
+        return hard
+    if method != "soft":
+        raise ValueError("Projection method must be 'soft' or 'polyline'")
+    vertices = np.asarray(vertices, float)
+    points = np.asarray(points, float)
+    delta = np.diff(vertices, axis=0)
+    lengths = np.linalg.norm(delta, axis=1)
+    h = float(.5 * np.median(lengths) if smoothing_width is None else smoothing_width)
+    if not np.isfinite(h) or h <= 0:
+        raise ValueError("Smoothing width must be positive")
+    tangents = delta / lengths[:, None]
+    starts = hard["vertex_s"][:-1]
+    soft_s = np.empty(len(points)); remote_mass = np.empty(len(points))
+    separation = max(4*h, branch_separation if branch_separation is not None else 3*np.median(lengths))
+    for begin in range(0, len(points), chunk_size):
+        q = points[begin:begin+chunk_size]
+        relative = q[:, None] - vertices[:-1]
+        t = np.einsum("nkd,kd->nk", relative, tangents)
+        normal2 = np.maximum(np.sum(relative**2, axis=2) - t**2, 0)
+        alpha = -t / h
+        beta = (lengths - t) / h
+        alpha[:, 0] = -np.inf
+        beta[:, -1] = np.inf
+        # Stable Gaussian interval mass: use survival probabilities in the
+        # positive tail to avoid subtracting two values rounded to one.
+        flip = alpha > 0
+        upper = np.where(flip, -alpha, beta)
+        lower = np.where(flip, -beta, alpha)
+        log_upper, log_lower = log_ndtr(upper), log_ndtr(lower)
+        with np.errstate(divide="ignore", invalid="ignore"):
+            log_z = log_upper + np.log(-np.expm1(log_lower-log_upper))
+        log_phi_a = -.5*alpha**2 - .5*np.log(2*np.pi)
+        log_phi_b = -.5*beta**2 - .5*np.log(2*np.pi)
+        mean_local = t + h*(np.exp(log_phi_a-log_z) - np.exp(log_phi_b-log_z))
+        means = starts + mean_local
+        log_mass = -.5*normal2/h**2 + log_z
+        weights = np.exp(log_mass-logsumexp(log_mass, axis=1)[:, None])
+        soft_s[begin:begin+len(q)] = np.sum(weights*means, axis=1)
+        remote = np.abs(means-hard["s"][begin:begin+len(q), None]) > separation
+        remote_mass[begin:begin+len(q)] = np.sum(weights*remote, axis=1)
+    if not np.all(np.isfinite(soft_s)):
+        raise ValueError("Non-finite soft projection; inspect path scale and smoothing width")
+    return {**hard, "hard_s": hard["s"], "s": soft_s,
+            "ambiguous": hard["ambiguous"] | (remote_mass > .05),
+            "remote_branch_weight": remote_mass,
+            "projection_method": "soft", "smoothing_width": h}

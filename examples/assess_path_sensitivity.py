@@ -23,21 +23,35 @@ def main():
     for root in sorted(output.glob("s*")):
         if not root.is_dir():
             continue
-        profiles = []; summaries = []; issues = []
+        profiles = []; summaries = []; issues = []; coordinate_profiles = []
         source = Path(args.data_root) / root.name
         trajectories, _, _, vertices, _, _ = load_inputs(source/"COLVAR", source/"window_kappa", source/"neb_HH_RELZ_30img.dat")
-        positions = [project_arclength(q, vertices)["s"] for q in trajectories]
-        for variant in ("base", "long_blocks", "fine_bins", "fine_stride"):
+        position_cache = {}
+        base_summary_path = root/"base/summary.json"
+        if not base_summary_path.is_file():
+            print(f"Missing baseline for {root.name}", flush=True)
+            continue
+        smooth = json.loads(base_summary_path.read_text()).get("projection_method") == "soft"
+        variants = ["base", "long_blocks", "fine_bins", "fine_stride"]
+        if smooth:
+            variants += ["projection_halfwidth", "projection_doublewidth"]
+        for variant in variants:
             if not (root / variant / "summary.json").is_file():
                 issues.append(f"missing_or_failed_variant_{variant}")
                 continue
             summary = json.loads((root / variant / "summary.json").read_text())
             data = np.load(root / variant / "fit_arrays.npz")
-            profiles.append({"x_star": data["grid"], "pmf_mean": data["pmf"],
-                             "pmf_std": np.sqrt(np.maximum(np.diag(data["covariance"]), 0))})
+            profile = {"x_star": data["grid"], "pmf_mean": data["pmf"],
+                       "pmf_std": np.sqrt(np.maximum(np.diag(data["covariance"]), 0))}
+            (coordinate_profiles if variant.startswith("projection_") else profiles).append(profile)
+            summary["variant"] = variant
             summaries.append(summary)
             issues.extend(i for i in summary["quality_issues"] if i not in ("sensitivity_suite_required", "low_effective_block_support"))
-            edges = np.linspace(0, np.linalg.norm(np.diff(vertices, axis=0), axis=1).sum(), len(data["nodes"])+1)
+            key = (summary.get("projection_method", "polyline"), summary.get("smoothing_width_A"))
+            if key not in position_cache:
+                position_cache[key] = [project_arclength(q, vertices, method=key[0], smoothing_width=key[1])["s"] for q in trajectories]
+            positions = position_cache[key]
+            edges = data["bin_edges"] if "bin_edges" in data else np.linspace(0, np.linalg.norm(np.diff(vertices, axis=0), axis=1).sum(), len(data["nodes"])+1)
             baseline = unweighted_block_support(positions, edges, block_size=summary["settings"]["block_size"], stride=summary["settings"]["stride"])
             ratio = data["block_ess"] / baseline
             summary["minimum_relative_effective_blocks"] = float(ratio.min())
@@ -62,16 +76,20 @@ def main():
             issues.extend(fit["quality_issues"])
         comparison = compare_profiles(profiles)
         issues.extend(comparison["quality_issues"])
+        coordinate_comparison = compare_profiles([profiles[0], *coordinate_profiles]) if coordinate_profiles else None
+        if coordinate_comparison and coordinate_comparison["maximum_profile_spread"] > .05:
+            issues.append("coordinate_definition_sensitivity")
         source = Path(args.data_root) / root.name
         audit = audit_campaign(source / "source_campaign.json", source / "neb_path_30_images.xyz")
         issues.extend(audit["quality_issues"])
         issues = sorted(set(issues))
         report = {"campaign": root.name, "status": diagnostic_status(issues),
                   "quality_issues": issues, "sensitivity": comparison,
+                  "coordinate_sensitivity": coordinate_comparison,
                   "prior_sensitivity": hypers, "campaign_audit": audit,
                   "profile_landmarks": profile_landmarks(base_refit),
                   "support_rule": "at least 4 effective blocks and 25% of unweighted block ESS in every bin",
-                  "variants": [{k: s[k] for k in ("lengthscale_A", "loo_rms", "loo_max_abs", "minimum_effective_blocks", "minimum_relative_effective_blocks", "half_profile_difference_range_eV")} for s in summaries]}
+                  "variants": [{k: s[k] for k in ("variant", "lengthscale_A", "loo_rms", "loo_max_abs", "minimum_effective_blocks", "minimum_relative_effective_blocks", "half_profile_difference_range_eV")} for s in summaries]}
         (root / "acceptance.json").write_text(json.dumps(report, indent=2) + "\n")
         all_cases.append(report)
         print(json.dumps(report, indent=2), flush=True)

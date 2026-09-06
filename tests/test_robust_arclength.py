@@ -1,7 +1,7 @@
 import numpy as np
 import pytest
 
-from gpr_umbrella.arclength import project_arclength
+from gpr_umbrella.arclength import project_arclength, project_polyline
 from gpr_umbrella.robust_1d import fit_linear_observations, barrier_posterior, covariance_reference
 
 
@@ -34,6 +34,24 @@ def test_nearby_remote_branches_flagged_not_window_dependent():
 def test_duplicate_path_vertices_fail():
     with pytest.raises(ValueError, match="duplicate"):
         project_arclength([[0, 0]], [[0, 0], [0, 0]])
+
+
+def test_soft_projection_removes_interior_vertex_point_mass():
+    q = np.random.default_rng(123).normal(0, .05, (10000, 2))
+    path = [[-1., 0.], [0., 0.], [0., 1.]]
+    hard = project_polyline(q, path)
+    soft = project_arclength(q, path, smoothing_width=.1)
+    assert np.mean(np.abs(hard["s"]-1) < 1e-9) > .2
+    assert np.mean(np.abs(soft["s"]-1) < 1e-9) < .001
+    assert soft["s"].std() > .02
+
+
+def test_soft_straight_line_independent_of_reference_segmentation():
+    q = np.c_[np.linspace(-.3, 1.3, 101), np.full(101, .07)]
+    a = project_arclength(q, [[0, 0], [1, 0]], smoothing_width=.03)
+    b = project_arclength(q, [[0, 0], [.13, 0], [.8, 0], [1, 0]], smoothing_width=.03)
+    np.testing.assert_allclose(a["s"], q[:, 0], atol=1e-9)
+    np.testing.assert_allclose(a["s"], b["s"], atol=1e-9)
 
 
 def test_adjacent_retracing_rejected():
@@ -107,6 +125,19 @@ def test_no_sub_resolution_hypers():
         fit_linear_observations(np.arange(5.), np.diff(np.eye(5), axis=0), np.ones(4), np.eye(4), np.arange(5.), lengthscales=[.01])
 
 
+def test_incompatible_rough_observations_cannot_get_a_good_fit_label():
+    nodes = np.linspace(0., 3., 21)
+    operator = np.diff(np.eye(len(nodes)), axis=0) / np.diff(nodes)[:, None]
+    values = (-1.)**np.arange(len(nodes)-1)
+    fit = fit_linear_observations(nodes, operator, values,
+            np.eye(len(values)) * .001**2, np.linspace(0., 3., 81),
+            lengthscales=np.geomspace(.15, 9., 15),
+            amplitudes=np.geomspace(.01, 3., 12))
+    assert set(fit["quality_issues"]) & {
+        "poor_raw_leave_one_out", "poor_blocked_cross_validation",
+        "lengthscale_prior_boundary", "amplitude_prior_boundary"}
+
+
 def test_correlated_barrier_and_explicit_basins():
     result = make_fit()
     barrier = barrier_posterior(result, (-.3, .3), (1., 1.5), draws=500)
@@ -121,7 +152,7 @@ def test_reference_covariance_gauge_invariant():
     np.testing.assert_allclose(covariance_reference(cov), covariance_reference(cov+10))
 
 
-def test_original_bias_reweighting_recovers_straight_path_marginal():
+def test_original_bias_reweighting_recovers_straight_path_marginal(tmp_path):
     pytest.importorskip("pymbar")
     from gpr_umbrella.projected_inputs import prepare_projected_observations
     rng = np.random.default_rng(7)
@@ -131,7 +162,7 @@ def test_original_bias_reweighting_recovers_straight_path_marginal():
     kbt = .3
     trajectories = [rng.normal(k*c/(k+curvature), np.sqrt(kbt/(k+curvature)), (3200, 2)) for c, k in zip(centers, kappa)]
     p = prepare_projected_observations(trajectories, centers, kappa, [[-1.5, 0], [1.5, 0]],
-             kbt=kbt, bins=12, stride=4, block_size=80, bootstraps=32)
+             kbt=kbt, bins=12, stride=4, block_size=80, bootstraps=32, reweight_cache=tmp_path/"cache")
     truth = .2 * (p["nodes"]-1.5)**2
     difference = p["histogram_pmf"] - truth
     assert np.ptp(difference) < .18
@@ -140,8 +171,13 @@ def test_original_bias_reweighting_recovers_straight_path_marginal():
     # In a separable straight-path system a common normal restraint changes
     # only the free-energy constant, not the longitudinal PMF shape.
     confined = prepare_projected_observations(trajectories, centers, kappa, [[-1.5, 0], [1.5, 0]],
-             kbt=kbt, bins=12, stride=4, block_size=80, bootstraps=32, target_normal_kappa=10.)
-    assert np.ptp(confined["histogram_pmf"] - truth) < .18
+             kbt=kbt, bins=12, stride=4, block_size=80, bootstraps=32, target_normal_kappa=10.,
+             profile_range=(-.25, 3.25), reweight_cache=tmp_path/"cache")
+    assert confined["nodes"][0] < 0 and confined["nodes"][-1] > 3
+    confined_truth = .2*(confined["nodes"]-1.5)**2
+    assert np.ptp(confined["histogram_pmf"] - confined_truth) < .18
+    assert p["reweight_cache_hits"] == 0
+    assert confined["reweight_cache_hits"] == 32
 
 
 def test_curved_path_original_2d_bias_known_angular_barrier():

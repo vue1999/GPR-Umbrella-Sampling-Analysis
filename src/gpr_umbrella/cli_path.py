@@ -100,6 +100,10 @@ def run(args):
                 kbt=kbt, bins=args.bins, stride=args.stride, block_size=args.block_size,
                 bootstraps=args.bootstraps, seed=args.seed,
                 target_normal_kappa=getattr(args, "target_normal_kappa", 0.),
+                profile_range=getattr(args, "s_range", None),
+                projection_method=getattr(args, "projection_method", "soft"),
+                smoothing_width=getattr(args, "smoothing_width", None),
+                reweight_cache=getattr(args, "reweight_cache", None),
                 progress=lambda s: print(s, flush=True))
     nodes = prepared["nodes"]
     grid = np.linspace(nodes[0], nodes[-1], args.grid_points)
@@ -148,7 +152,7 @@ def run(args):
                header="s_A F_eV sigma_eV; endpoint-bin referenced; conditional + hyperparameter mixture")
     np.savetxt(output / "hyperparameters.tsv", result["hyperparameter_table"],
                header="\t".join(result["hyperparameter_columns"]), delimiter="\t")
-    np.savez_compressed(output / "fit_arrays.npz", nodes=nodes, operator=prepared["operator"],
+    np.savez_compressed(output / "fit_arrays.npz", nodes=nodes, bin_edges=prepared["bin_edges"], operator=prepared["operator"],
                values=prepared["values"], noise_covariance=prepared["noise_covariance"],
                grid=grid, pmf=result["pmf_mean"], covariance=result["pmf_covariance"],
                bootstrap_pmf=prepared["bootstrap_pmf"], overlap=prepared["overlap_matrix"],
@@ -159,6 +163,8 @@ def run(args):
                "method": "original-2D-bias MBAR preparation + correlated-increment SE GPR",
                "target": ("path-normal-restrained arclength marginal" if getattr(args, "target_normal_kappa", 0.) else "unrestrained arclength marginal") + "; common physical walls retained; not F along a 2D NEB slice",
                "target_normal_kappa_eV_A2": getattr(args, "target_normal_kappa", 0.),
+               "projection_method": prepared["projection_method"], "smoothing_width_A": prepared["smoothing_width"],
+               "reweight_cache_hits": prepared["reweight_cache_hits"],
                "lengthscale_A": result["lengthscale"], "sigma_f_eV": result["sigma_f"],
                "loo_rms": float(np.sqrt(np.mean(result["loo_z"]**2))),
                "loo_max_abs": float(np.max(np.abs(result["loo_z"]))),
@@ -174,7 +180,7 @@ def run(args):
                "projection": prepared["projection_summary"], "inputs": provenance,
                "reference_sha256": hashlib.sha256(Path(args.path_reference).read_bytes()).hexdigest()}
     (output / "summary.json").write_text(json.dumps(summary, indent=2) + "\n")
-    figure = plot_diagnostics(result, output_prefix="projected arclength SE")
+    figure = plot_diagnostics(result, output_prefix=f"{prepared['projection_method']} path progress SE")
     figure.savefig(output / "diagnostics_1d.png", dpi=160, bbox_inches="tight")
     import matplotlib.pyplot as plt
     plt.close(figure)
@@ -193,6 +199,11 @@ def main():
     parser.add_argument("--target-normal-kappa", type=float, default=0.,
                         help="Explicit alternative target: common harmonic distance-to-path restraint in eV/Å²; default 0 unrestrained")
     parser.add_argument("--bins", type=int)
+    parser.add_argument("--projection-method", choices=("soft", "polyline"), default="soft")
+    parser.add_argument("--smoothing-width", type=float, help="Soft path-coordinate width in Å; default half the median reference spacing")
+    parser.add_argument("--reweight-cache", help="Optional SHA-keyed cache of verified block-bootstrap window normalisations")
+    parser.add_argument("--s-range", nargs=2, type=float,
+                        help="Optional sampled arclength range, including negative/extended endpoint tails; empty bins still fail")
     parser.add_argument("--stride", type=int, default=10)
     parser.add_argument("--block-size", type=int, default=1000, help="Original stored samples, not thinned samples")
     parser.add_argument("--bootstraps", type=int, default=128)

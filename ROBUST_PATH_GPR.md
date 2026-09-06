@@ -5,15 +5,30 @@ diagnostic plotting functions. It is not a replacement plotting/GP framework.
 
 ## What is being estimated?
 
-For samples q=(HH, RELZ), the reference is an **ordered 2D polyline**. Its scalar
-coordinate is geometric arclength, not sorted HH. Both coordinates must be in
-the same explicitly chosen metric (the DAIS frontend uses Å). The endpoint
-segments extend as rays, so samples beyond the first/last image are not piled
-onto one endpoint. The profile itself is reported only on sampled histogram
-support within the finite NEB range.
+For samples q=(HH, RELZ), the reference is an **ordered 2D polyline**, not sorted
+HH. The default coordinate is a **soft arclength-based path progress**: the mean
+physical arclength over the continuous path, weighted by
+exp(-distance(q,path(s))²/(2h²)). Segment integrals are analytic, including
+infinite endpoint rays. Both CVs must use the same explicitly chosen metric
+(the DAIS frontend uses Å). It exactly equals geometric projection on a straight
+line; on bends it is an explicitly different, smooth coordinate. The default
+h is half the median reference spacing and is saved in every output. Width
+sensitivity is checked separately from GP hyperparameter sensitivity.
+
+This avoids **both endpoint clipping and finite-area point masses at polygon
+vertices**. The latter affected up to 14% of samples in individual DAIS windows
+and can create artificial features in a projected density. `--projection-method
+polyline` is retained for comparison, with vertex pile-ups explicitly flagged.
+The profile is reported only on sampled histogram support within the finite NEB
+range unless an explicit range is supplied.
+
+Use `--s-range LOW HIGH` to include genuinely sampled endpoint tails (negative
+arclength is allowed). This is useful when a reactant minimum lies at the first
+NEB image. Empty bins still fail: the GP cannot supply an unsampled basin.
 
 Nonmonotonic HH is valid. Retracing and self-intersections are rejected; nearby
-arclength-remote branches are flagged. Neither window ID nor trajectory history
+arclength-remote branches and substantial soft weights on remote branches are
+flagged. Neither window ID nor trajectory history
 is used to change the projection. At a true intersection, two CV values cannot
 identify which physical branch a structure belongs to. Add a structural CV or
 analyse separate pathways; do not manufacture a window-dependent coordinate.
@@ -92,6 +107,12 @@ For barrier sampling also supply `--reactant-interval LOW HIGH` and
 `--transition-interval LOW HIGH` in Å, chosen using the physical states. The
 reporting target `--max-barrier-std` never changes the fit to reduce an error.
 
+`--reweight-cache DIR` optionally shares block-bootstrap window normalisations
+between binning, projection, and thermodynamic-target comparisons. Cache keys
+hash the full original bias matrix and sampling/resampling settings. Reused
+states are checked against the MBAR equations and files are replaced atomically.
+This accelerates preparation only; it does not reuse a GP fit or its diagnostics.
+
 On DAIS, `/u/vueszter/work/projects/Desorption/GPR/run_arclength_1d.py` now delegates
 to this entry point. Use the isolated `.venv-robust-gpr/bin/python` beside it.
 Its previous approximate implementation is retained as
@@ -133,5 +154,9 @@ complete transverse sampling, or publication readiness.
   https://doi.org/10.1063/1.2978177 (MBAR).
 * https://pymbar.readthedocs.io/en/stable/mbar.html (original bias matrices,
   overlap and independent-sample assumptions).
+* Branduardi, Gervasio & Parrinello, J. Chem. Phys. 126, 054103 (2007),
+  https://doi.org/10.1063/1.2432340 (soft path collective variables). The
+  continuous-arclength segment integrals here are an extension of that idea,
+  not a claim to implement their original discrete formula verbatim.
 
 Block resampling here is explicit because these MD trajectories are correlated.
