@@ -181,6 +181,18 @@ def prepare_projected_observations(
         )
     if progress is not None:
         progress(f"Projecting {sum(len(q) for q in trajectories)} original frames")
+    reference_projection = project_arclength(
+        vertices,
+        vertices,
+        ambiguity_distance=ambiguity_distance,
+        method=projection_method,
+        smoothing_width=smoothing_width,
+    )
+    if np.any(np.diff(reference_projection["s"]) <= 0):
+        raise ValueError(
+            "Nonmonotonic path progress on the ordered reference: reduce smoothing "
+            "width or provide a resolved/separate pathway; sorting cannot fix this"
+        )
     projected = [
         project_arclength(
             q,

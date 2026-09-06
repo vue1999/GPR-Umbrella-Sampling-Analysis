@@ -28,7 +28,9 @@ NEB image. Empty bins still fail: the GP cannot supply an unsampled basin.
 
 Nonmonotonic HH is valid. Retracing and self-intersections are rejected; nearby
 arclength-remote branches and substantial soft weights on remote branches are
-flagged. Neither window ID nor trajectory history
+flagged. The smoothed coordinate must also remain increasing along the ordered
+reference itself: excessive smoothing of a tight fold cannot be hidden by
+sorting the resulting coordinates. Neither window ID nor trajectory history
 is used to change the projection. At a true intersection, two CV values cannot
 identify which physical branch a structure belongs to. Add a structural CV or
 analyse separate pathways; do not manufacture a window-dependent coordinate.

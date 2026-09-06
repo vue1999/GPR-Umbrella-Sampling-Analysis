@@ -40,6 +40,26 @@ def test_duplicate_path_vertices_fail():
         project_arclength([[0, 0]], [[0, 0], [0, 0]])
 
 
+def test_smoothed_reference_fold_cannot_be_sorted_away():
+    from gpr_umbrella.projected_inputs import prepare_projected_observations
+
+    path = [[0, 0], [4, 0], [4, 1], [3, 1], [3, 0.1], [2, 0.1], [2, 2], [0, 2]]
+    centers = np.array([[0.0, 0.0], [0.0, 2.0]])
+    trajectories = [np.tile(c, (800, 1)) for c in centers]
+    with pytest.raises(ValueError, match="Nonmonotonic path progress"):
+        prepare_projected_observations(
+            trajectories,
+            centers,
+            np.ones_like(centers),
+            path,
+            kbt=0.03,
+            bins=4,
+            stride=1,
+            block_size=100,
+            bootstraps=32,
+        )
+
+
 def test_soft_projection_removes_interior_vertex_point_mass():
     q = np.random.default_rng(123).normal(0, 0.05, (10000, 2))
     path = [[-1.0, 0.0], [0.0, 0.0], [0.0, 1.0]]
