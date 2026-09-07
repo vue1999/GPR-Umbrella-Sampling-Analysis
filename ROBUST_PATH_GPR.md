@@ -25,6 +25,9 @@ range unless an explicit range is supplied.
 Use `--s-range LOW HIGH` to include genuinely sampled endpoint tails (negative
 arclength is allowed). This is useful when a reactant minimum lies at the first
 NEB image. Empty bins still fail: the GP cannot supply an unsampled basin.
+Alternatively, `--bin-edges FILE` supplies finite, strictly increasing bin edges
+for local refinement. Nonuniform bin widths are included in the density estimate.
+The campaign-specific endpoint-refinement experiment was not run at closeout.
 
 Nonmonotonic HH is valid. Retracing and self-intersections are rejected; nearby
 arclength-remote branches and substantial soft weights on remote branches are
@@ -74,9 +77,14 @@ reaction coordinate. Both require equilibrated sampling and common Hamiltonians.
    optimiser. Sub-spacing lengthscales are disallowed. The grid bounds and weights
    are saved. Conditional uncertainty and between-hyperparameter covariance are
    combined. No fitted white-noise inflation or outlier deletion hides failures.
-5. Raw conditional LOO and contiguous-interval held-out diagnostics remain visible.
-   Hyperparameters are selected using the full data, so these are diagnostic CV
-   scores, not an independent external validation claim.
+5. Predictive LOO and contiguous-interval held-out checks use the hyperparameter
+   mixture with weights recomputed after removing each held-out likelihood.
+   Pointwise scores are normal quantiles of the mixture predictive CDF; joint
+   block scores use its correlated predictive covariance. Single-best-model
+   diagnostics are retained separately. These are GP-observation checks, not
+   independent end-to-end validation of the MD preparation. The final mixture
+   implementation passed unit tests but was not rerun on the DAIS campaigns
+   before closeout; their saved plots still show single-best-model diagnostics.
 6. Barriers require explicit ordered reactant and transition intervals. Full
    correlated posterior curves are sampled, including hyperparameter and extrema
    selection uncertainty. Extrema repeatedly hitting interval boundaries are
@@ -100,14 +108,17 @@ MPLBACKEND=Agg gpr-umbrella-path \
   --colvar-dir /absolute/path/COLVAR \
   --kappa-dir /absolute/path/window_kappa \
   --path-reference /absolute/path/ordered_HH_RELZ.dat \
-  --temperature 300 --bins 30 --stride 20 \
-  --block-size 1000 --bootstraps 128 \
+  --temperature 300 --bins 30 --stride 1 \
+  --block-size 4000 --bootstraps 128 \
   --output-dir /absolute/path/new_analysis
 ```
 
 For barrier sampling also supply `--reactant-interval LOW HIGH` and
 `--transition-interval LOW HIGH` in Å, chosen using the physical states. The
 reporting target `--max-barrier-std` never changes the fit to reduce an error.
+The example explicitly uses all frames and 10-ps blocks for the DAIS 2.5-fs
+stored sampling interval; the corresponding sensitivity suite remained partly
+incomplete at closeout. These settings are not a claim of universal convergence.
 
 `--reweight-cache DIR` optionally shares block-bootstrap window normalisations
 between binning, projection, and thermodynamic-target comparisons. Cache keys
