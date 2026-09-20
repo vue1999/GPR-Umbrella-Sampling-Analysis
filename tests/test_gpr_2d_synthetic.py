@@ -5,8 +5,10 @@ draws biased samples per window, and checks that the reconstructed PMF matches
 the truth to within a tolerance after aligning the additive constant.
 """
 import numpy as np
+import pytest
 
-from gpr_umbrella import reconstruct_pmf_2d
+from gpr_umbrella import reconstruct_pmf_2d, find_lowest_barrier_path
+from gpr_umbrella.pathways import save_lowest_barrier_path
 from gpr_umbrella.support import window_anchored_display_policy
 from gpr_umbrella.plotting_2d import (
     plot_diagnostics_2d,
@@ -15,129 +17,63 @@ from gpr_umbrella.plotting_2d import (
 )
 
 
-def true_pmf(x, y):
-    """Two basins separated by a barrier; smooth and well-behaved."""
-    return (-1.5 * np.exp(-((x + 1.0) ** 2 + (y + 0.5) ** 2) / 0.8)
-            - 1.2 * np.exp(-((x - 1.0) ** 2 + (y - 0.6) ** 2) / 0.8))
+# The runnable example owns the shared analytic surface and sampling generator.
+from importlib.util import module_from_spec, spec_from_file_location
+from pathlib import Path
+
+_demo_spec = spec_from_file_location(
+    "synthetic_2d_demo", Path(__file__).resolve().parents[1] / "examples/run_synthetic_2d_demo.py")
+_demo = module_from_spec(_demo_spec)
+_demo_spec.loader.exec_module(_demo)
+build_synthetic_data, true_pmf = _demo.build_synthetic_data, _demo.true_pmf
 
 
-def true_grad(x, y):
-    g1 = -1.5 * np.exp(-((x + 1.0) ** 2 + (y + 0.5) ** 2) / 0.8)
-    g2 = -1.2 * np.exp(-((x - 1.0) ** 2 + (y - 0.6) ** 2) / 0.8)
-    dx = g1 * (-2 * (x + 1.0) / 0.8) + g2 * (-2 * (x - 1.0) / 0.8)
-    dy = g1 * (-2 * (y + 0.5) / 0.8) + g2 * (-2 * (y - 0.6) / 0.8)
-    return np.array([dx, dy])
+@pytest.fixture(scope="module")
+def synthetic_fit(tmp_path_factory):
+    return reconstruct_pmf_2d(
+        data=build_synthetic_data(), support_radius=1.,
+        output_dir=str(tmp_path_factory.mktemp("synthetic2d")),
+        plot=True, plot_diagnostics=True, save_outputs=True, verbose=False,
+        cv_names=("x", "y"), cv_units=("u", "u"))
 
 
-def build_synthetic_data(n_per_side=6, n_samples=4000, kappa=(20.0, 20.0),
-                         seed=0):
-    rng = np.random.default_rng(seed)
-    cx = np.linspace(-2.2, 2.2, n_per_side)
-    cy = np.linspace(-2.0, 2.0, n_per_side)
-    kappa = np.asarray(kappa, dtype=float)
-
-    centers, kappas, positions = [], [], []
-    for x0 in cx:
-        for y0 in cy:
-            c = np.array([x0, y0])
-            # Sample around the biased minimum: with a stiff harmonic bias the
-            # window distribution is ~ Gaussian centred near c, shifted by the
-            # local PMF gradient (linear-response): mean ~= c - grad/kappa.
-            shift = true_grad(x0, y0) / kappa
-            mean = c - shift
-            cov = np.diag(1.0 / kappa)        # width set by the restraint
-            samp = rng.multivariate_normal(mean, cov, size=n_samples)
-            centers.append(c)
-            kappas.append(kappa.copy())
-            positions.append(samp)
-
-    return {
-        "window_files": [f"w{i}" for i in range(len(centers))],
-        "centers": np.array(centers),
-        "kappa": np.array(kappas),
-        "means": np.array([p.mean(axis=0) for p in positions]),
-        "vars": np.array([p.var(axis=0, ddof=1) for p in positions]),
-        "n_samples": np.array([len(p) for p in positions], dtype=float),
-        "all_positions": positions,
-    }
-
-
-def test_2d_pmf_recovery():
-    data = build_synthetic_data()
-    res = reconstruct_pmf_2d(
-        data=data, plot=False, plot_diagnostics=False, save_outputs=False,
-        verbose=False, cv_names=("x", "y"), cv_units=("u", "u"),
-    )
-    GX, GY, pmf = res["GX"], res["GY"], res["pmf"]
-
-    truth = true_pmf(GX, GY)
-    truth = truth - truth.min()
-    pred = pmf - pmf.min()
-
-    # Compare over the interior (avoid extrapolation at grid edges).
+def test_2d_pmf_and_saddle_recovery(synthetic_fit):
+    res = synthetic_fit
+    for key in ("pmf_path", "figure_path", "diagnostics_path", "fit_metadata_path"):
+        assert Path(res[key]).stat().st_size > 0
+    truth = true_pmf(res["GX"], res["GY"])
+    pred = res["pmf"] - res["pmf"].min()
+    truth -= truth.min()
     sl = (slice(5, -5), slice(5, -5))
-    rmse = np.sqrt(np.mean((pred[sl] - truth[sl]) ** 2))
-    assert rmse < 0.15, f"2D PMF RMSE too high: {rmse:.3f}"
+    assert np.sqrt(np.mean((pred[sl] - truth[sl])**2)) < .15
+    gx, gy = res["gx"], res["gy"]
+    interior = np.abs(gx) < .9
+    x_peak = gx[interior][np.argmax(pred[interior, np.argmin(np.abs(gy))])]
+    assert abs(x_peak) < .6
 
 
-def test_barrier_location():
-    """The reconstructed barrier (max along the basin-connecting line) sits
-    near the analytic saddle at x~0."""
-    data = build_synthetic_data()
-    res = reconstruct_pmf_2d(
-        data=data, plot=False, plot_diagnostics=False, save_outputs=False,
-        verbose=False,
-    )
-    gx, gy, pmf = res["gx"], res["gy"], res["pmf"]
-    j0 = np.argmin(np.abs(gy - 0.0))
-    line = pmf[:, j0]
-    # The inter-basin saddle is a local max *between* the wells (x~-1 and x~+1),
-    # not the global max (which sits on the far-field plateau at the edges).
-    interior = np.abs(gx) < 0.9
-    x_barrier = gx[interior][np.argmax(line[interior])]
-    assert abs(x_barrier) < 0.6, f"barrier x={x_barrier:.2f} far from saddle"
+def test_standalone_path_recovers_saddle_and_saves(synthetic_fit, tmp_path):
+    path = find_lowest_barrier_path(synthetic_fit, endpoints=((-1., -.5), (1., .6)))
+    assert abs(path["ts_xy"][0]) < .5
+    assert .7 < path["energy_range"] < 1.2
+    data_file, image_file = tmp_path / "path.dat", tmp_path / "path.png"
+    save_lowest_barrier_path(path, str(data_file))
+    plot_lowest_barrier_path(synthetic_fit, path, output_path=str(image_file))
+    assert data_file.is_file() and image_file.stat().st_size > 0
 
 
-def test_lowest_barrier_path_recovers_saddle(tmp_path):
-    """The minimum-range path connects the wells through the analytic saddle (x~0),
-    recovers a sensible barrier, and writes both the data file and figure."""
-    data = build_synthetic_data()
-    res = reconstruct_pmf_2d(
-        data=data, output_dir=str(tmp_path), output_prefix="path",
-        support_radius=1.0,
-        plot=True, plot_diagnostics=False, find_lowest_barrier=True,
-        path_endpoints=((-1.0, -0.5), (1.0, 0.6)),
-        path_aligned_marginal=True, thermal_energy=0.15,
-        perpendicular_points=31,
-        save_outputs=True, verbose=False, cv_names=("x", "y"),
-    )
-    path = res["lowest_barrier_path"]
-    assert abs(path["ts_xy"][0]) < 0.5, f"TS x={path['ts_xy'][0]:.2f} off saddle"
-    assert 0.7 < path["barrier"] < 1.2, f"barrier {path['barrier']:.2f} eV"
-    assert (tmp_path / "path_pmf_2d.dat").exists()
-    assert (tmp_path / "path_pmf_2d.png").exists()
-    assert (tmp_path / "path_lowest_barrier_path.dat").exists()
-    assert (tmp_path / "path_lowest_barrier_path.png").exists()
-    assert (tmp_path / "path_path_aligned_pmf_1d.dat").exists()
-    marginal = res["path_aligned_marginal"]
-    assert marginal["pmf"].min() == 0.0
-    assert np.all(np.isfinite(marginal["pmf"]))
-    assert np.all(np.isfinite(marginal["sigma"]))
-
-
-def test_diagnostics_figure(tmp_path):
-    """The 8-panel diagnostics figure is produced and written to disk."""
-    data = build_synthetic_data()
-    res = reconstruct_pmf_2d(
-        data=data, output_dir=str(tmp_path), output_prefix="diag",
-        plot=False, plot_diagnostics=True, save_outputs=False, verbose=False,
-    )
-    diag = tmp_path / "diag_diagnostics_2d.png"
-    assert res["diagnostics_path"] == str(diag)
-    assert diag.exists() and diag.stat().st_size > 0
-    # The diagnostics rely on these fields being exported from the results dict.
-    for key in ("vars", "all_positions", "grad", "tau", "loo_z"):
-        assert key in res
+def test_diagnostics_keep_all_sampling_and_model_panels(synthetic_fit, tmp_path):
+    res = dict(synthetic_fit, covariance_block_size=4000, extra_noise=np.array([.1, .2]))
+    output = tmp_path / "diagnostics.png"
+    figure = plot_diagnostics_2d(res, output_path=str(output))
+    titles = [ax.get_title() for ax in figure.axes]
+    for panel in ("2D PMF", "Uncertainty", "Window drift", "Mean-force direction",
+                  "Autocorrelation time", "Window overlap", "Per-observation LOO", "Calibration check"):
+        assert sum(title.startswith(panel) for title in titles) == 1
+    header = " ".join(text.get_text() for text in figure.texts)
+    assert "4000" in header and "extra gradient SD" in header and "0.1" in header and "0.2" in header
+    assert "ℓ" in header and "σ_f" in header
+    assert output.stat().st_size > 0
 
 
 def _scatter_offsets(ax, label):
@@ -190,8 +126,7 @@ def test_2d_plots_mark_gp_observations_at_sampled_means():
     data = build_synthetic_data(n_per_side=4, n_samples=600)
     res = reconstruct_pmf_2d(
         data=data, plot=False, plot_diagnostics=False, save_outputs=False,
-        find_lowest_barrier=True, verbose=False, grid_n=(24, 24),
-        path_endpoints=((-1.0, -0.5), (1.0, 0.6)),
+        verbose=False, grid_n=(24, 24),
         support_radius=1.0,
         optimize_hyperparams=False, fixed_sigma_f=1.0,
         fixed_lengthscale=(1.0, 1.0),
@@ -231,7 +166,8 @@ def test_2d_plots_mark_gp_observations_at_sampled_means():
         np.column_stack([force_quiver.X, force_quiver.Y]), res["means"]
     )
 
-    path_fig = plot_lowest_barrier_path(res, res["lowest_barrier_path"])
+    path = find_lowest_barrier_path(res, endpoints=((-1., -.5), (1., .6)))
+    path_fig = plot_lowest_barrier_path(res, path)
     path_ax = next(
         ax for ax in path_fig.axes if ax.get_title() == "Exact minimum-range grid path"
     )
@@ -245,8 +181,8 @@ def test_2d_plots_mark_gp_observations_at_sampled_means():
     ]
     assert len(path_lines) == 1
     np.testing.assert_allclose(
-        path_lines[0].get_xdata(), res["lowest_barrier_path"]["x"]
+        path_lines[0].get_xdata(), path["x"]
     )
     np.testing.assert_allclose(
-        path_lines[0].get_ydata(), res["lowest_barrier_path"]["y"]
+        path_lines[0].get_ydata(), path["y"]
     )

@@ -5,6 +5,8 @@ import numpy as np
 
 from .plotting_1d import PALETTE, apply_plot_style, _band, _annotate
 from .support import window_anchored_display_policy
+
+
 def _bounded_contourf(ax, GX, GY, values, limits, cmap_name, *,
                       levels=30, warn_below=True, alpha=1.0):
     """Draw fixed-level contours and mark values beyond the limits in red."""
@@ -32,6 +34,19 @@ def _bounded_contours(ax, GX, GY, values, limits, *, levels=15, alpha=0.4):
         GX, GY, values, levels=line_levels, colors="k", linewidths=0.3,
         alpha=alpha,
     )
+
+
+def _finish_figure(fig, output_path, show):
+    """Save or display a figure consistently across the plotting entry points."""
+    import matplotlib.pyplot as plt
+
+    if output_path:
+        fig.savefig(output_path, dpi=150, bbox_inches="tight")
+    if show:
+        plt.show()
+    else:
+        plt.close(fig)
+    return fig
 
 
 def plot_pmf_2d(results: dict, output_path: str | None = None,
@@ -70,54 +85,33 @@ def plot_pmf_2d(results: dict, output_path: str | None = None,
     )
     fig.colorbar(
         cf, ax=axes[0],
-        label=f"PMF − sampled-window minimum ({eu}); red = outside display range",
+        label=f"PMF − sampled-window minimum ({eu})\nred = outside display range",
     )
     axes[0].set_title("2D PMF (window-anchored display)")
     axes[0].legend(loc="upper right", fontsize=8)
 
-    cs = _bounded_contourf(
-        axes[1], GX, GY, pmf_std_raw,
-        display["uncertainty_limits"]["pmf_std_raw"], "magma",
-        warn_below=False,
-    )
-    _window_scatter(
-        axes[1], means, centers, mean_color="cyan", mean_size=18,
-        show_targets=show_targets,
-    )
-    fig.colorbar(
-        cs, ax=axes[1],
-        label=f"PMF uncertainty ({eu}); red = above display range",
-    )
-    axes[1].set_title("Raw GP 1σ uncertainty")
-
-    cs = _bounded_contourf(
-        axes[2], GX, GY, pmf_std_calibrated,
-        display["uncertainty_limits"]["pmf_std_calibrated"], "magma",
-        warn_below=False,
-    )
-    _window_scatter(
-        axes[2], means, centers, mean_color="cyan", mean_size=18,
-        show_targets=show_targets,
-    )
-    fig.colorbar(
-        cs, ax=axes[2],
-        label=f"PMF uncertainty ({eu}); red = above display range",
-    )
     factor = results["loo_calibration_factor"]
-    axes[2].set_title(f"LOO-scaled 1σ uncertainty (×{factor:.2f})")
+    for ax, values, key, title in zip(
+        axes[1:], (pmf_std_raw, pmf_std_calibrated),
+        ("pmf_std_raw", "pmf_std_calibrated"),
+        ("Raw GP 1σ uncertainty", f"LOO-scaled 1σ uncertainty (×{factor:.2f})"),
+    ):
+        cs = _bounded_contourf(
+            ax, GX, GY, values, display["uncertainty_limits"][key], "magma",
+            warn_below=False,
+        )
+        _window_scatter(ax, means, centers, mean_color="cyan", mean_size=18,
+                        show_targets=show_targets)
+        fig.colorbar(cs, ax=ax,
+                     label=f"PMF uncertainty ({eu}); red = above display range")
+        ax.set_title(title)
 
     for ax in axes:
         ax.set_xlabel(f"{cvn[0]} ({cvu[0]})")
         ax.set_ylabel(f"{cvn[1]} ({cvu[1]})")
 
     fig.tight_layout()
-    if output_path:
-        fig.savefig(output_path, dpi=150, bbox_inches="tight")
-    if show:
-        plt.show()
-    else:
-        plt.close(fig)
-    return fig
+    return _finish_figure(fig, output_path, show)
 
 
 def _window_scatter(ax, means, centers=None, cmap="viridis", *,
@@ -211,7 +205,7 @@ def plot_diagnostics_2d(results: dict, output_path: str | None = None,
     _window_scatter(ax, means, centers, show_targets=show_targets)
     fig.colorbar(
         cf, ax=ax,
-        label=f"PMF − sampled-window minimum ({eu}); red = outside display range",
+        label=f"PMF − sampled-window minimum ({eu})\nred = outside display range",
     )
     ax.set_title("2D PMF (window-anchored display)")
     ax.legend(loc="upper right", fontsize=7)
@@ -248,7 +242,7 @@ def plot_diagnostics_2d(results: dict, output_path: str | None = None,
         ax, means, centers, mean_color="white", mean_size=18,
         show_targets=show_targets,
     )
-    ax.set_title(f"Window drift  (max normalized |Δ| = {dmag.max():.2f})")
+    ax.set_title(f"Window drift\n(max normalized |Δ| = {dmag.max():.2f})")
     ax.set_xlabel(xlab)
     ax.set_ylabel(ylab)
 
@@ -283,7 +277,7 @@ def plot_diagnostics_2d(results: dict, output_path: str | None = None,
     )
     fig.colorbar(quiver, ax=ax, label=f"|ell · grad F| ({eu})")
     ax.set_title(
-        f"Mean-force direction at sampled means "
+        f"Mean-force direction at sampled means\n"
         f"(mean metric magnitude = {gmag.mean():.2f} {eu})"
     )
     ax.set_xlabel(xlab)
@@ -367,13 +361,7 @@ def plot_diagnostics_2d(results: dict, output_path: str | None = None,
 
     fig.text(0.5, 0.915, noise_note, ha="center", fontsize=8)
 
-    if output_path:
-        fig.savefig(output_path, dpi=150, bbox_inches="tight")
-    if show:
-        plt.show()
-    else:
-        plt.close(fig)
-    return fig
+    return _finish_figure(fig, output_path, show)
 
 
 def plot_lowest_barrier_path(results: dict, path_result: dict,
@@ -381,14 +369,11 @@ def plot_lowest_barrier_path(results: dict, path_result: dict,
                              output_prefix: str | None = None,
                              show: bool = False,
                              show_targets: bool = True):
-    """Plot a lowest-barrier grid path and its 1D energy profile.
+    """Plot a selected path and its endpoint-referenced free-energy profile.
 
-    Left:   PMF contour, located minima, and the lowest-barrier path with its
-            transition state marked.
-    Centre: free energy along the path (relative to its visited minimum) with
-            the selected ±1σ / ±2σ uncertainty band.
-    Right:  when requested, the separately referenced path-aligned marginal
-            PMF obtained by perpendicular Boltzmann integration.
+    Report the forward endpoint rise separately from the full energy range.
+    Uncertainty includes covariance with the endpoint, conditional on the fit
+    and the selected maximum.
     """
     import matplotlib
     if not show:
@@ -405,14 +390,11 @@ def plot_lowest_barrier_path(results: dict, path_result: dict,
     cvn, cvu = path_result["cv_names"], path_result["cv_units"]
     eu = path_result["energy_unit"]
     s = path_result["s"]
-    E_rel = path_result["pmf_rel_path_min"]
-    sig = path_result["sigma_from_path_min"]
+    E_rel = path_result["pmf_rel"]
+    sig = path_result["sigma"]
     ts_s = path_result["ts_s"]
-    barrier, berr = path_result["barrier"], path_result["barrier_err"]
-    marginal = path_result.get("path_aligned_marginal")
-
-    ncols = 3 if marginal is not None else 2
-    fig, axes = plt.subplots(1, ncols, figsize=(19 if ncols == 3 else 14, 5.6))
+    rise = path_result["endpoint_to_max"]
+    fig, axes = plt.subplots(1, 2, figsize=(14, 5.6))
     fig.subplots_adjust(top=0.82, bottom=0.22, wspace=0.28)
 
     # --- Left: surface + path ---------------------------------------------
@@ -426,7 +408,7 @@ def plot_lowest_barrier_path(results: dict, path_result: dict,
     )
     fig.colorbar(
         cf, ax=ax,
-        label=f"PMF − sampled-window minimum ({eu}); red = outside display range",
+        label=f"PMF − sampled-window minimum ({eu})\nred = outside display range",
     )
     mode = path_result.get("path_mode", "search")
     path_label = "minimum-range path" if mode != "fixed" else "fixed path"
@@ -472,56 +454,29 @@ def plot_lowest_barrier_path(results: dict, path_result: dict,
     )
     ax.legend(loc="best")
     _annotate(ax, f"TS candidate: {path_result['ts_xy'][0]:.2g} {cvu[0]}, "
-                  f"{path_result['ts_xy'][1]:.2g} {cvu[1]}   ·   "
-                  f"{len(path_result['minima'])} minima")
+                  f"{path_result['ts_xy'][1]:.2g} {cvu[1]}")
 
     # --- Right: energy profile along the path -----------------------------
     ax = axes[1]
     sigma_label = path_result["default_uncertainty"]
     _band(ax, s, E_rel, sig, PALETTE["guide"], label=f"{sigma_label} ±1σ / ±2σ")
-    ax.plot(s, E_rel, color="black", linewidth=1.8, label="PMF - path minimum")
+    ax.plot(s, E_rel, color="black", linewidth=1.8, label="PMF - starting endpoint")
     ax.axhline(0, color=PALETTE["guide"], linewidth=0.6, alpha=0.6)
     ax.axvline(ts_s, color=PALETTE["warn"], linestyle="--", linewidth=0.9,
                alpha=0.75)
-    ax.scatter([ts_s], [barrier], marker="*", c=PALETTE["warn"],
+    ax.scatter([ts_s], [rise], marker="*", c=PALETTE["warn"],
                edgecolors="k", s=190, zorder=6, label="TS")
     ax.set_xlabel("Dimensionless metric arclength s")
     ax.set_ylabel(f"Relative free energy ({eu})")
-    ax.set_title("Free energy along the grid path (path-minimum-referenced)")
+    ax.set_title("Free energy along the path (endpoint-referenced)")
     ax.legend(loc="best")
-    _annotate(ax,
-              f"barrier (max - min) = {barrier:.3g} ± {berr:.2g} {eu}     "
-              f"ΔF = {path_result['delta_f']:.3g} ± "
-              f"{path_result['delta_f_err']:.2g} {eu}")
-
-    if marginal is not None:
-        ax = axes[2]
-        _band(
-            ax,
-            marginal["s"],
-            marginal["pmf"],
-            marginal["sigma"],
-            PALETTE["pmf_band"],
-            label=f"{marginal['default_uncertainty']} ±1σ / ±2σ",
-        )
-        ax.plot(
-            marginal["s"],
-            marginal["pmf"],
-            color=PALETTE["pmf"],
-            linewidth=1.8,
-            label="A(s) - min A(s)",
-        )
-        ax.axhline(0, color=PALETTE["guide"], linewidth=0.6, alpha=0.6)
-        ax.set_xlabel("Dimensionless metric arclength s")
-        ax.set_ylabel(f"Marginal free energy ({eu})")
-        ax.set_title("Perpendicular Boltzmann marginal (minimum-referenced)")
-        ax.legend(loc="best")
-        _annotate(
-            ax,
-            f"kBT = {marginal['thermal_energy']:.3g} {eu}  ·  "
-            f"{int(np.median(marginal['perpendicular_samples']))} "
-            "median samples/station",
-        )
+    _annotate(
+        ax,
+        f"Endpoint → maximum = {rise:.3g} ± {path_result['endpoint_to_max_err']:.2g} {eu}\n"
+        f"Energy range (max − min) = {path_result['energy_range']:.3g} ± "
+        f"{path_result['energy_range_err']:.2g} {eu}; "
+        f"ΔF = {path_result['delta_f']:.3g} ± {path_result['delta_f_err']:.2g} {eu}",
+    )
 
     # Header block (matches the diagnostics figure so the two read as a set)
     title = "2D GPR path analysis"
@@ -540,10 +495,4 @@ def plot_lowest_barrier_path(results: dict, path_result: dict,
              fontsize=13, fontweight="bold")
     fig.text(0.5, 0.925, setup, ha="center", va="top",
              fontsize=9.5, color="#333333")
-    if output_path:
-        fig.savefig(output_path, dpi=150, bbox_inches="tight")
-    if show:
-        plt.show()
-    else:
-        plt.close(fig)
-    return fig
+    return _finish_figure(fig, output_path, show)

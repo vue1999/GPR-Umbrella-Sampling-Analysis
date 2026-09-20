@@ -51,116 +51,35 @@ def _generate_synthetic_colvar_data(tmpdir: str, n_windows: int = 15):
     return colvar_dir, centers_file, kappa, centers, a
 
 
-class TestSyntheticHarmonic:
-    @pytest.fixture(autouse=True)
-    def setup(self, tmp_path):
-        self.tmpdir = str(tmp_path)
-        self.colvar_dir, self.centers_file, self.kappa, self.centers, self.a = \
-            _generate_synthetic_colvar_data(self.tmpdir)
+@pytest.fixture(scope="module")
+def harmonic_fit(tmp_path_factory):
+    root = str(tmp_path_factory.mktemp("harmonic"))
+    colvars, centers, kappa, _, curvature = _generate_synthetic_colvar_data(root)
+    result = reconstruct_pmf_1d(
+        colvar_dir=colvars, kappa=kappa, centers=centers, cv_unit="nm", energy_unit="eV",
+        output_dir=root, output_prefix="synthetic", plot=True, save_fig=True,
+        save_outputs=True, verbose=False, show=False)
+    return result, curvature
 
-    def test_pmf_shape_is_parabolic(self):
-        """Recovered PMF should approximate 0.5 * a * x^2."""
-        results = reconstruct_pmf_1d(
-            colvar_dir=self.colvar_dir,
-            kappa=self.kappa,
-            centers=self.centers_file,
-            cv_unit="nm",
-            energy_unit="eV",
-            output_dir=self.tmpdir,
-            output_prefix="synthetic",
-            plot=False,
-            save_outputs=False,
-            verbose=False,
-        )
 
-        x = results["x_star"]
-        pmf = results["pmf_mean"]
+def test_harmonic_pmf_and_derivative_recovery(harmonic_fit):
+    result, curvature = harmonic_fit
+    x = result["x_star"]
+    truth = .5 * curvature * x**2
+    assert np.corrcoef(result["pmf_mean"], truth - truth[0])[0, 1] > .95
+    assert np.corrcoef(result["deriv_mean"], curvature * x)[0, 1] > .95
+    assert .3 < result["loo_z"].std() < 3.
 
-        # Shift reference so both are zero at x[0]
-        true_pmf = 0.5 * self.a * x**2
-        true_pmf_shifted = true_pmf - true_pmf[0]
 
-        # Allow generous tolerance since the synthetic data is noisy
-        # and the mock kT assumption is simplified, but the shape
-        # should match a parabola.  Check correlation is very high.
-        corr = np.corrcoef(pmf, true_pmf_shifted)[0, 1]
-        assert corr > 0.95, f"PMF correlation with true parabola = {corr:.3f}"
-
-    def test_derivatives_match_linear(self):
-        """Recovered derivatives should approximate a * x."""
-        results = reconstruct_pmf_1d(
-            colvar_dir=self.colvar_dir,
-            kappa=self.kappa,
-            centers=self.centers_file,
-            cv_unit="nm",
-            energy_unit="eV",
-            output_dir=self.tmpdir,
-            output_prefix="synthetic",
-            plot=False,
-            save_outputs=False,
-            verbose=False,
-        )
-
-        x = results["x_star"]
-        deriv = results["deriv_mean"]
-        true_deriv = self.a * x
-
-        corr = np.corrcoef(deriv, true_deriv)[0, 1]
-        assert corr > 0.95, f"Derivative correlation with true linear = {corr:.3f}"
-
-    def test_loo_z_scores_reasonable(self):
-        """LOO z-score std should be in a reasonable range."""
-        results = reconstruct_pmf_1d(
-            colvar_dir=self.colvar_dir,
-            kappa=self.kappa,
-            centers=self.centers_file,
-            cv_unit="nm",
-            energy_unit="eV",
-            output_dir=self.tmpdir,
-            output_prefix="synthetic",
-            plot=False,
-            save_outputs=False,
-            verbose=False,
-        )
-
-        loo_z_std = results["loo_z"].std()
-        # A well-calibrated model should have LOO z-score std near 1.
-        # Be generous: 0.3 to 3.0
-        assert 0.3 < loo_z_std < 3.0, f"LOO z-score std = {loo_z_std:.2f}"
-
-    def test_output_files_created(self):
-        """Ensure PMF/derivative/figure files are saved correctly."""
-        results = reconstruct_pmf_1d(
-            colvar_dir=self.colvar_dir,
-            kappa=self.kappa,
-            centers=self.centers_file,
-            cv_unit="nm",
-            energy_unit="eV",
-            output_dir=self.tmpdir,
-            output_prefix="synthetic",
-            plot=True,
-            save_fig=True,
-            save_outputs=True,
-            verbose=False,
-            show=False,
-        )
-
-        assert results["pmf_path"] is not None
-        assert results["deriv_path"] is not None
-        assert results["figure_path"] is not None
-        assert os.path.isfile(results["pmf_path"])
-        assert os.path.isfile(results["deriv_path"])
-        assert os.path.isfile(results["figure_path"])
-        assert os.path.basename(results["pmf_path"]) == "synthetic_pmf_1d.dat"
-        assert os.path.basename(results["deriv_path"]) == "synthetic_mean_force_1d.dat"
-        assert os.path.basename(results["figure_path"]) == "synthetic_diagnostics_1d.png"
-
-        # Check PMF file has correct shape
-        pmf_data = np.loadtxt(results["pmf_path"])
-        assert pmf_data.shape[1] == 3
-        assert pmf_data.shape[0] == 200  # default n_star
-        np.testing.assert_allclose(np.diag(results["pmf_covariance"]), results["pmf_std"]**2, atol=1e-10)
-        assert results["uncertainty_calibration_factor"] >= 1.0
+def test_harmonic_outputs_and_uncertainty(harmonic_fit):
+    result, _ = harmonic_fit
+    for key, suffix in [("pmf_path", "pmf_1d.dat"), ("deriv_path", "mean_force_1d.dat"),
+                        ("figure_path", "diagnostics_1d.png")]:
+        assert os.path.isfile(result[key])
+        assert os.path.basename(result[key]) == f"synthetic_{suffix}"
+    assert np.loadtxt(result["pmf_path"]).shape == (200, 3)
+    np.testing.assert_allclose(np.diag(result["pmf_covariance"]), result["pmf_std"]**2, atol=1e-10)
+    assert result["uncertainty_calibration_factor"] >= 1.
 
 
 class TestEdgeCases:

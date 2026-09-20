@@ -102,3 +102,29 @@ def test_cli_exposes_native_options():
     assert a.covariance_block_size == 4000 and a.fit_extra_noise
     assert a.extra_noise_scale == [1., 2.] and a.sigma_f_max == 3.
     assert build_parser().parse_args(['--colvar-dir', 'x']).sigma_f_max is None
+
+
+@pytest.mark.parametrize("all_fail", [True, False])
+def test_optimizer_rejects_failed_and_nonfinite_candidates(monkeypatch, all_fail):
+    """A low objective cannot rescue a failed start; no valid start means error."""
+    from types import SimpleNamespace
+    import gpr_umbrella.fitting_2d as fitting
+
+    outcomes = [(False, -100.), (True, np.nan), (True, np.inf),
+                (False, -20.), (not all_fail, 7.), (False, -10.)]
+    calls = []
+    def fake_minimize(fun, x, **kwargs):
+        success, value = outcomes[len(calls)]
+        calls.append(np.asarray(x).copy())
+        return SimpleNamespace(x=x, fun=value, success=success, nit=1, message="test")
+    monkeypatch.setattr(fitting, "minimize", fake_minimize)
+    args = (np.array([[0., 0.], [1., 1.]]), np.ones(4), np.eye(4) * .01,
+            np.ones(2), np.ones(2) * 6, 1., None, None, True)
+    if all_fail:
+        with pytest.raises(RuntimeError, match="All six.*failed"):
+            fitting.fit_hyperparameters(*args)
+    else:
+        amplitude, lengths, _, ok, metadata = fitting.fit_hyperparameters(*args)
+        assert ok and metadata["objective"] == 7.
+        np.testing.assert_allclose(np.r_[amplitude, lengths], np.exp(calls[4]))
+    assert len(calls) == 6

@@ -6,7 +6,7 @@ import numpy as np
 import pytest
 
 import gpr_umbrella.integration_2d as integration_2d
-from gpr_umbrella.fitting_2d import training_covariance
+from gpr_umbrella.fitting_2d import objective, force_scales, training_covariance
 
 from gpr_umbrella.integration_2d import (
     _grid_support_mask,
@@ -14,9 +14,7 @@ from gpr_umbrella.integration_2d import (
     _k_f_grad,
     _k_grad_grad,
     _leave_one_window_out_z,
-    _nll,
     _se,
-    _with_relative_diagonal_jitter,
     estimate_mean_covariance,
     posterior_covariance_2d,
     reconstruct_pmf_2d,
@@ -290,14 +288,14 @@ def test_nll_uses_the_complete_observation_covariance() -> None:
     expected = (
         0.5 * y @ np.linalg.solve(Ky, y)
         + 0.5 * log_determinant
-        + 0.5 * len(y) * np.log(2.0 * np.pi)
+        - len(X) * np.log(force_scales(y, noise)).sum()
     )
-    np.testing.assert_allclose(_nll(params, X, y, noise), expected, rtol=2e-13)
+    np.testing.assert_allclose(objective(np.log(params), X, y, noise)[0], expected, rtol=2e-13)
 
     diagonal_only = np.diag(np.diag(noise))
     assert not np.isclose(
-        _nll(params, X, y, noise),
-        _nll(params, X, y, diagonal_only),
+        objective(np.log(params), X, y, noise)[0],
+        objective(np.log(params), X, y, diagonal_only)[0],
         rtol=1e-7,
         atol=1e-9,
     )
@@ -493,142 +491,39 @@ def test_pmf_reference_is_lowest_point_within_support(monkeypatch) -> None:
     assert results["pmf"].ravel().min() < 0.0
 
 
-def test_optimized_reconstruction_is_invariant_to_energy_unit_rescaling() -> None:
-    factor = 96.485
-    base = _reconstruct_small(
-        _small_correlated_data(),
-        energy_unit="eV",
-        optimize_hyperparams=True,
-        restrict_to_sampled_support=False,
-        support_radius=None,
-    )
-    rescaled = _reconstruct_small(
-        _rescale_energy(_small_correlated_data(), factor),
-        energy_unit="kJ/mol",
-        optimize_hyperparams=True,
-        restrict_to_sampled_support=False,
-        support_radius=None,
-    )
-
+@pytest.mark.parametrize("energy,coordinate,optimize,fixed", [
+    (96.485, (1., 1.), True, False),
+    (1., (7., .01), True, False),
+    (1., (7., .01), False, True),
+    (1., (7., .01), False, False),
+])
+def test_unit_rescaling_preserves_reconstruction(energy, coordinate, optimize, fixed):
+    coordinate = np.asarray(coordinate)
+    data = _small_correlated_data()
+    scaled = _rescale_energy(_rescale_coordinates(data, coordinate), energy)
+    options = dict(optimize_hyperparams=optimize, support_radius=1.5)
+    fixed_base = dict(fixed_lengthscale=(.8, 1.1), fixed_sigma_f=1.2) if fixed else {}
+    fixed_scaled = (dict(fixed_lengthscale=np.array([.8, 1.1]) * coordinate,
+                         fixed_sigma_f=1.2 * energy) if fixed else {})
+    base = _reconstruct_small(data, **options, **fixed_base)
+    rescaled = _reconstruct_small(scaled, **options, **fixed_scaled)
     assert base["fit_ok"] and rescaled["fit_ok"]
-    np.testing.assert_allclose(
-        rescaled["lengthscale"], base["lengthscale"], rtol=3e-3, atol=2e-5
-    )
-    assert rescaled["sigma_f"] / factor == pytest.approx(
-        base["sigma_f"], rel=3e-3, abs=2e-6
-    )
-    np.testing.assert_allclose(
-        rescaled["pmf"] / factor,
-        base["pmf"],
-        rtol=3e-3,
-        atol=3e-5,
-    )
-    np.testing.assert_allclose(
-        np.sqrt(rescaled["latent_variance_raw"]) / factor,
-        np.sqrt(base["latent_variance_raw"]),
-        rtol=4e-3,
-        atol=3e-5,
-    )
+    for axis, factor in zip(("gx", "gy"), coordinate):
+        np.testing.assert_allclose(rescaled[axis] / factor, base[axis],
+                                   rtol=3e-3 if optimize else 2e-14, atol=2e-5 if optimize else 0.)
+    np.testing.assert_allclose(rescaled["lengthscale"] / coordinate, base["lengthscale"],
+                               rtol=3e-3 if optimize else 2e-12, atol=2e-5 if optimize else 2e-14)
+    assert rescaled["sigma_f"] / energy == pytest.approx(
+        base["sigma_f"], rel=3e-3 if optimize else 2e-12, abs=2e-6 if optimize else 2e-14)
+    for key, optimized_rtol in (("pmf", 3e-3), ("pmf_std_raw", 4e-3)):
+        np.testing.assert_allclose(rescaled[key] / energy, base[key],
+                                   rtol=optimized_rtol if optimize else 3e-5,
+                                   atol=3e-5 if optimize else 2e-7)
+    np.testing.assert_allclose(np.sqrt(rescaled["latent_variance_raw"]) / energy,
+                               np.sqrt(base["latent_variance_raw"]),
+                               rtol=4e-3 if optimize else 3e-5, atol=3e-5 if optimize else 2e-7)
     np.testing.assert_array_equal(rescaled["support_mask"], base["support_mask"])
-    assert rescaled["loo_calibration_factor"] == pytest.approx(
-        base["loo_calibration_factor"], rel=5e-3
-    )
-
-
-def test_independent_cv_rescaling_with_fixed_hyperparameters_is_invariant() -> None:
-    coordinate_factors = np.array([7.0, 0.01])
-    lengthscale = np.array([0.8, 1.1])
-    base = _reconstruct_small(
-        _small_correlated_data(),
-        optimize_hyperparams=False,
-        fixed_lengthscale=lengthscale,
-        fixed_sigma_f=1.2,
-        restrict_to_sampled_support=True,
-        support_radius=1.5,
-    )
-    rescaled = _reconstruct_small(
-        _rescale_coordinates(_small_correlated_data(), coordinate_factors),
-        optimize_hyperparams=False,
-        fixed_lengthscale=lengthscale * coordinate_factors,
-        fixed_sigma_f=1.2,
-        restrict_to_sampled_support=True,
-        support_radius=1.5,
-    )
-
-    np.testing.assert_allclose(
-        rescaled["gx"] / coordinate_factors[0], base["gx"], rtol=2e-14
-    )
-    np.testing.assert_allclose(
-        rescaled["gy"] / coordinate_factors[1], base["gy"], rtol=2e-14
-    )
-    np.testing.assert_allclose(rescaled["pmf"], base["pmf"], rtol=3e-5, atol=2e-7)
-    np.testing.assert_allclose(
-        rescaled["pmf_std_raw"], base["pmf_std_raw"], rtol=3e-5, atol=2e-7
-    )
-    np.testing.assert_array_equal(rescaled["support_mask"], base["support_mask"])
-
-
-def test_optimized_reconstruction_is_invariant_to_independent_cv_units() -> None:
-    coordinate_factors = np.array([7.0, 0.01])
-    base = _reconstruct_small(
-        _small_correlated_data(),
-        optimize_hyperparams=True,
-        restrict_to_sampled_support=False,
-        support_radius=None,
-    )
-    rescaled = _reconstruct_small(
-        _rescale_coordinates(_small_correlated_data(), coordinate_factors),
-        optimize_hyperparams=True,
-        restrict_to_sampled_support=False,
-        support_radius=None,
-    )
-
-    assert base["fit_ok"] and rescaled["fit_ok"]
-    np.testing.assert_allclose(
-        rescaled["lengthscale"] / coordinate_factors,
-        base["lengthscale"],
-        rtol=3e-3,
-        atol=2e-5,
-    )
-    assert rescaled["sigma_f"] == pytest.approx(
-        base["sigma_f"], rel=3e-3, abs=2e-6
-    )
-    np.testing.assert_allclose(
-        rescaled["pmf"], base["pmf"], rtol=3e-3, atol=3e-5
-    )
-    np.testing.assert_allclose(
-        rescaled["pmf_std_raw"],
-        base["pmf_std_raw"],
-        rtol=4e-3,
-        atol=3e-5,
-    )
-    np.testing.assert_array_equal(rescaled["support_mask"], base["support_mask"])
-
-
-def test_no_optimize_default_hyperparameters_follow_independent_cv_rescaling() -> None:
-    coordinate_factors = np.array([7.0, 0.01])
-    base = _reconstruct_small(
-        _small_correlated_data(),
-        optimize_hyperparams=False,
-        restrict_to_sampled_support=True,
-        support_radius=1.5,
-    )
-    rescaled = _reconstruct_small(
-        _rescale_coordinates(_small_correlated_data(), coordinate_factors),
-        optimize_hyperparams=False,
-        restrict_to_sampled_support=True,
-        support_radius=1.5,
-    )
-
-    np.testing.assert_allclose(
-        rescaled["lengthscale"] / coordinate_factors,
-        base["lengthscale"],
-        rtol=2e-12,
-        atol=2e-14,
-    )
-    assert rescaled["sigma_f"] == pytest.approx(base["sigma_f"], rel=2e-12)
-    np.testing.assert_allclose(rescaled["pmf"], base["pmf"], rtol=3e-5, atol=2e-7)
-    np.testing.assert_array_equal(rescaled["support_mask"], base["support_mask"])
+    assert rescaled["loo_calibration_factor"] == pytest.approx(base["loo_calibration_factor"], rel=5e-3)
 
 
 def test_data_input_honors_kj_kappa_conversion_without_mutating_caller() -> None:
@@ -693,3 +588,16 @@ def test_zero_signal_data_requires_an_explicit_signal_scale() -> None:
     )
     np.testing.assert_allclose(result["pmf"], 0.0, atol=0.0)
     assert np.all(np.isfinite(result["pmf_std_raw"]))
+
+
+def test_minimal_trajectory_input_recomputes_derived_statistics_without_mutation():
+    full = _small_correlated_data()
+    minimal = {key: full[key] for key in ("centers", "kappa", "all_positions")}
+    stale = dict(minimal, means=np.full_like(full["means"], 123.),
+                 vars=np.zeros_like(full["vars"]), n_samples=np.ones(4))
+    options = dict(optimize_hyperparams=False, fixed_lengthscale=(.8, 1.1), fixed_sigma_f=1.2)
+    reference = _reconstruct_small(minimal, **options)
+    actual = _reconstruct_small(stale, **options)
+    for key in ("means", "vars", "n_samples", "grad", "pmf"):
+        np.testing.assert_allclose(actual[key], reference[key])
+    assert np.all(stale["means"] == 123.)

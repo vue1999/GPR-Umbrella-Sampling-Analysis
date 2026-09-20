@@ -33,8 +33,12 @@ import os
 import glob
 
 import numpy as np
-from scipy.optimize import minimize
 from scipy.linalg import cho_factor, cho_solve
+
+from .fitting_2d import (
+    _se, _k_f_grad, _k_grad_grad,
+    fit_hyperparameters, numerical_jitter, training_covariance,
+)
 
 from .integration_1d import (
     _extract_window_index,
@@ -71,9 +75,9 @@ def load_plumed_colvar_2d(
     When ``kappa_in_kj_per_mol`` is true, force constants are converted from
     kJ/mol/CV_unit² to ``energy_unit/CV_unit²`` before reconstruction.
 
-    Returns a dict with arrays keyed by window:
-      ``centers`` (N, 2), ``kappa`` (N, 2), ``means`` (N, 2), ``vars`` (N, 2),
-      ``n_samples`` (N,), ``all_positions`` (list of (n_w, 2) arrays).
+    Returns ``centers`` and ``kappa`` arrays of shape (N, 2),
+    ``all_positions`` (one (n_w, 2) trajectory per window), and source filenames.
+    Reconstruction derives all sample statistics from these trajectories.
     """
     colvar_files = glob.glob(os.path.join(colvar_dir, "COLVAR_window_*.dat"))
     if not colvar_files:
@@ -117,17 +121,10 @@ def load_plumed_colvar_2d(
     if kappa_in_kj_per_mol:
         kappas = kappas * _kj_per_mol_to_energy_factor(energy_unit)
 
-    means = np.array([p.mean(axis=0) for p in all_positions])
-    variances = np.array([p.var(axis=0, ddof=1) for p in all_positions])
-    n_samples = np.array([len(p) for p in all_positions], dtype=float)
-
     return {
         "window_files": colvar_files,
         "centers": centers,
         "kappa": kappas,
-        "means": means,
-        "vars": variances,
-        "n_samples": n_samples,
         "all_positions": all_positions,
     }
 
@@ -272,103 +269,6 @@ def _grid_support_mask(
     return sampled_support_mask(points, training_points, lengthscale, radius)
 
 
-# ---------------------------------------------------------------------------
-# Separable squared-exponential kernel and its derivatives (D dims)
-# ---------------------------------------------------------------------------
-
-def _se(Xa: np.ndarray, Xb: np.ndarray, sigma_f: float,
-        ell: np.ndarray) -> np.ndarray:
-    """Base SE covariance matrix between point sets Xa (Na,D) and Xb (Nb,D)."""
-    diff = Xa[:, None, :] - Xb[None, :, :]          # (Na, Nb, D)
-    sqdist = np.sum((diff / ell) ** 2, axis=2)      # (Na, Nb)
-    return sigma_f**2 * np.exp(-0.5 * sqdist)
-
-
-def _k_f_grad(Xs: np.ndarray, Xt: np.ndarray, sigma_f: float,
-              ell: np.ndarray) -> np.ndarray:
-    """Cov(f(Xs), d f(Xt)/dXt_j).  Returns (M, N*D).
-
-    dk/dXt_j = (r_j / ell_j^2) k, with r = Xs - Xt.
-    """
-    M, N, D = Xs.shape[0], Xt.shape[0], Xt.shape[1]
-    r = Xs[:, None, :] - Xt[None, :, :]             # (M, N, D)
-    k = _se(Xs, Xt, sigma_f, ell)                   # (M, N)
-    out = (r / ell**2) * k[:, :, None]              # (M, N, D)
-    return out.reshape(M, N * D)
-
-
-def _k_grad_grad(Xa: np.ndarray, Xb: np.ndarray, sigma_f: float,
-                 ell: np.ndarray) -> np.ndarray:
-    """Cov(d f(Xa)/dXa_i, d f(Xb)/dXb_j).  Returns (Na*D, Nb*D).
-
-    d2k/dXa_i dXb_j = k * [ delta_ij/ell_i^2 - r_i r_j /(ell_i^2 ell_j^2) ],
-    with r = Xa - Xb.
-    """
-    Na, D = Xa.shape
-    Nb = Xb.shape[0]
-    r = Xa[:, None, :] - Xb[None, :, :]             # (Na, Nb, D)
-    k = _se(Xa, Xb, sigma_f, ell)                   # (Na, Nb)
-    inv2 = 1.0 / ell**2                             # (D,)
-    # delta_ij / ell_i^2 term
-    delta = np.zeros((Na, Nb, D, D))
-    idx = np.arange(D)
-    delta[:, :, idx, idx] = inv2[None, None, :]
-    # r_i r_j /(ell_i^2 ell_j^2)
-    ri = (r * inv2)[:, :, :, None]                  # (Na,Nb,D,1)
-    rj = (r * inv2)[:, :, None, :]                  # (Na,Nb,1,D)
-    block = (delta - ri * rj) * k[:, :, None, None]  # (Na,Nb,D,D)
-    return block.transpose(0, 2, 1, 3).reshape(Na * D, Nb * D)
-
-
-# ---------------------------------------------------------------------------
-# Hyperparameters via marginal likelihood on the gradient observations
-# ---------------------------------------------------------------------------
-
-def _with_relative_diagonal_jitter(
-    covariance: np.ndarray,
-    relative: float = 1e-8,
-) -> np.ndarray:
-    """Return a copy with component-wise, unit-covariant diagonal jitter."""
-    covariance = np.asarray(covariance, dtype=float)
-    if covariance.ndim != 2 or covariance.shape[0] != covariance.shape[1]:
-        raise ValueError("covariance must be a square matrix")
-    if not np.isfinite(relative) or relative <= 0:
-        raise ValueError("relative jitter must be finite and positive")
-    result = covariance.copy()
-    diagonal = np.diag(result)
-    if np.any(~np.isfinite(diagonal)) or np.any(diagonal <= 0):
-        raise ValueError("covariance must have a finite positive diagonal")
-    result[np.diag_indices_from(result)] += relative * diagonal
-    return result
-
-def _nll(params: np.ndarray, X: np.ndarray, y: np.ndarray,
-         noise_cov: np.ndarray) -> float:
-    sigma_f, ell = params[0], params[1:]
-    if sigma_f <= 0 or np.any(ell <= 0):
-        return 1e12
-    n = len(y)
-    Kgg = _k_grad_grad(X, X, sigma_f, ell)
-    from .fitting_2d import training_covariance
-    Ky = training_covariance(Kgg, noise_cov, y)
-    try:
-        L, low = cho_factor(Ky, lower=True)
-        alpha = cho_solve((L, low), y)
-        return float(0.5 * y @ alpha + np.sum(np.log(np.diag(L)))
-                     + 0.5 * n * np.log(2 * np.pi))
-    except np.linalg.LinAlgError:
-        return 1e12
-
-
-def _fit_hyperparameters_2d(X, y, noise_cov, ell_init, ell_upper, sigma_f_init,
-                            fixed_lengthscale, fixed_sigma_f, optimize):
-    """Compatibility entry point using the native analytic multistart fitter."""
-    from .fitting_2d import fit_hyperparameters
-    sf, ell, _, ok, _ = fit_hyperparameters(
-        X, y, noise_cov, ell_init, ell_upper, sigma_f_init,
-        fixed_lengthscale, fixed_sigma_f, optimize,
-    )
-    return sf, ell, ok
-
 def posterior_covariance_2d(
     results: dict,
     Xa: np.ndarray,
@@ -463,30 +363,22 @@ def reconstruct_pmf_2d(
     output_prefix: str | None = None,
     plot: bool = True,
     plot_diagnostics: bool = True,
-    find_lowest_barrier: bool = False,
-    path_endpoints=None,
-    path_metric_scale: tuple[float, float] | None = None,
-    path_reference: np.ndarray | None = None,
-    path_mode: str = "search",
-    path_corridor_radius: float | None = None,
-    path_aligned_marginal: bool = False,
-    thermal_energy: float | None = None,
-    perpendicular_points: int = 201,
-    perpendicular_width: float | None = None,
     save_outputs: bool = True,
     verbose: bool = True,
 ) -> dict:
     """Reconstruct a 2D PMF from umbrella windows via gradient-observation GPR.
 
     Provide either *colvar_dir* (loaded with :func:`load_plumed_colvar_2d`) or a
-    pre-loaded *data* dict in the same schema (handy for synthetic tests).
+    pre-loaded *data* dict containing ``centers``, ``kappa`` and
+    ``all_positions``. Means, variances and counts are derived once from the
+    trajectories; any legacy summary keys in *data* are ignored.
     For either source, ``kappa_in_kj_per_mol=True`` converts a copied force-
     constant array into the selected numerical ``energy_unit``.
     ``cv_units`` contains one unit per coordinate; force constants and GP
     gradients are interpreted in ``energy_unit / cv_units[d]²`` and
     ``energy_unit / cv_units[d]``, respectively.
 
-    By default plots, path search, and transverse integration are restricted
+    By default plots and path analysis are restricted
     to the union of kernel-scaled neighborhoods around sampled window means.
     ``support_radius`` gives the radius in GP lengthscales.
 
@@ -497,8 +389,8 @@ def reconstruct_pmf_2d(
     including sampling variance). ``sigma_f_max`` optionally limits the GP
     amplitude in energy units; no additional cap is imposed by default.
     Numerical jitter is fixed from the data, independent of fitted parameters.
-    ``path_mode`` selects free search between required endpoints, corridor search using a
-    reference trajectory, or direct evaluation of that fixed trajectory.
+    Path analysis is a separate operation: pass the returned surface to
+    :func:`gpr_umbrella.pathways.find_lowest_barrier_path`.
     """
     if (colvar_dir is None) == (data is None):
         raise ValueError("Provide exactly one of colvar_dir or data.")
@@ -517,10 +409,6 @@ def reconstruct_pmf_2d(
     grid_n = tuple(int(value) for value in grid_values)
     if prediction_batch_size < 1:
         raise ValueError("prediction_batch_size must be positive")
-    if path_aligned_marginal and thermal_energy is None:
-        raise ValueError(
-            "thermal_energy is required when path_aligned_marginal=True"
-        )
 
     if data is None:
         data = load_plumed_colvar_2d(
@@ -538,15 +426,21 @@ def reconstruct_pmf_2d(
             )
         base_dir = output_dir or "."
 
-    centers = data["centers"]
-    kappa = data["kappa"]
-    means = data["means"]
-    variances = data["vars"]
-    n_samples = data["n_samples"]
-    all_positions = data["all_positions"]
+    centers = np.asarray(data["centers"], dtype=float)
+    kappa = np.asarray(data["kappa"], dtype=float)
+    all_positions = [np.asarray(p, dtype=float) for p in data["all_positions"]]
+    if centers.ndim != 2 or centers.shape[1] != 2 or not len(centers):
+        raise ValueError("centers must have shape (n_windows, 2)")
     N, D = centers.shape
-    if D != 2:
-        raise ValueError(f"reconstruct_pmf_2d expects 2 CVs, got {D}")
+    if kappa.shape != centers.shape or len(all_positions) != N:
+        raise ValueError("centers, kappa and all_positions must contain the same windows")
+    if any(p.ndim != 2 or p.shape[1] != D or len(p) < 2 for p in all_positions):
+        raise ValueError("Each window trajectory must have shape (n_samples >= 2, 2)")
+    if not all(np.all(np.isfinite(v)) for v in [centers, kappa, *all_positions]):
+        raise ValueError("centers, kappa and window trajectories must contain finite values")
+    means = np.array([p.mean(axis=0) for p in all_positions])
+    variances = np.array([p.var(axis=0, ddof=1) for p in all_positions])
+    n_samples = np.array([len(p) for p in all_positions], dtype=float)
 
     # Effective sample size per window per CV component
     tau = np.array([[compute_tau_int(p[:, d], max_lag=max_lag,
@@ -617,7 +511,6 @@ def reconstruct_pmf_2d(
             )
         sigma_f_init = float(fixed_sigma_f)
 
-    from .fitting_2d import fit_hyperparameters, numerical_jitter, training_covariance
     sigma_f, ell, extra_noise, ok, optimization = fit_hyperparameters(
         X, y, noise_cov, ell_init, ell_upper, sigma_f_init,
         fixed_lengthscale, fixed_sigma_f, optimize_hyperparams,
@@ -788,7 +681,8 @@ def reconstruct_pmf_2d(
         output_prefix = (os.path.basename(base_dir) if base_dir not in (None, ".")
                          else "gpr_2d")
     out = output_dir or base_dir or "."
-    Path(out).mkdir(parents=True, exist_ok=True)
+    if save_outputs or plot or plot_diagnostics:
+        Path(out).mkdir(parents=True, exist_ok=True)
 
     if save_outputs:
         flat = np.column_stack([GX.ravel(), GY.ravel(),
@@ -836,66 +730,5 @@ def reconstruct_pmf_2d(
         results["diagnostics_path"] = diag_path
         if verbose:
             print(f"wrote {diag_path}")
-
-    if find_lowest_barrier or path_aligned_marginal:
-        from .pathways import (
-            find_lowest_barrier_path,
-            save_lowest_barrier_path,
-            save_path_aligned_marginal,
-        )
-        path_result = find_lowest_barrier_path(
-            results,
-            endpoints=path_endpoints,
-            metric_scale=path_metric_scale,
-            reference_path=path_reference,
-            path_mode=path_mode,
-            corridor_radius=path_corridor_radius,
-            path_aligned_marginal=path_aligned_marginal,
-            thermal_energy=thermal_energy,
-            perpendicular_points=perpendicular_points,
-            perpendicular_width=perpendicular_width,
-        )
-        results["lowest_barrier_path"] = path_result
-        if verbose:
-            print(f"Lowest-barrier path: {len(path_result['minima'])} minima; "
-                  f"{tuple(round(v,2) for v in path_result['start_xy'])} -> "
-                  f"{tuple(round(v,2) for v in path_result['end_xy'])}")
-            print(f"     barrier   = {path_result['barrier']:.3f} +/- "
-                  f"{path_result['barrier_err']:.3f} {energy_unit}  "
-                  f"(TS at {tuple(round(v,2) for v in path_result['ts_xy'])})")
-            print(f"     reaction dF = {path_result['delta_f']:.3f} +/- "
-                  f"{path_result['delta_f_err']:.3f} {energy_unit}")
-        if save_outputs:
-            path_data = os.path.join(out, f"{output_prefix}_lowest_barrier_path.dat")
-            save_lowest_barrier_path(path_result, path_data)
-            results["lowest_barrier_path_file"] = path_data
-            if verbose:
-                print(f"wrote {path_data}")
-        if path_aligned_marginal:
-            marginal = path_result["path_aligned_marginal"]
-            results["path_aligned_marginal"] = marginal
-            if verbose:
-                print(
-                    "Path-aligned marginal PMF: "
-                    f"{marginal['pmf'].min():.3f}..{marginal['pmf'].max():.3f} "
-                    f"{energy_unit} at kBT={marginal['thermal_energy']:.5g} "
-                    f"{energy_unit}"
-                )
-            if save_outputs:
-                marginal_data = os.path.join(
-                    out, f"{output_prefix}_path_aligned_pmf_1d.dat"
-                )
-                save_path_aligned_marginal(marginal, marginal_data)
-                results["path_aligned_marginal_path"] = marginal_data
-                if verbose:
-                    print(f"wrote {marginal_data}")
-        if plot:
-            from .plotting_2d import plot_lowest_barrier_path
-            path_fig = os.path.join(out, f"{output_prefix}_lowest_barrier_path.png")
-            plot_lowest_barrier_path(results, path_result, output_path=path_fig,
-                                     output_prefix=output_prefix)
-            results["lowest_barrier_path_figure"] = path_fig
-            if verbose:
-                print(f"wrote {path_fig}")
 
     return results

@@ -5,6 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import numpy as np
+import pytest
 
 from gpr_umbrella import reconstruct_pmf_1d
 
@@ -52,138 +53,34 @@ def _write_colvars(
     return colvar_dir, centers_file
 
 
-def _reconstruct(
-    colvar_dir: Path,
-    centers_file: Path,
-    *,
-    kappa: float,
-    cv_unit: str,
-    energy_unit: str,
-) -> dict:
-    return reconstruct_pmf_1d(
-        colvar_dir=str(colvar_dir),
-        kappa=kappa,
-        centers=str(centers_file),
-        cv_unit=cv_unit,
-        energy_unit=energy_unit,
-        optimize_hyperparams=True,
-        plot=False,
-        save_outputs=False,
-        verbose=False,
-    )
-
-
-def _assert_close(actual, expected, *, rtol=5e-4, atol=2e-7) -> None:
-    np.testing.assert_allclose(actual, expected, rtol=rtol, atol=atol)
-
-
-def test_energy_unit_rescaling_preserves_reconstruction(tmp_path: Path) -> None:
-    """Changing eV to kJ/mol rescales every energy-valued GP quantity."""
+@pytest.mark.parametrize("energy,coordinate", [(ENERGY_SCALE, 1.), (1., COORDINATE_SCALE)])
+def test_unit_rescaling_preserves_reconstruction(tmp_path, energy, coordinate):
+    """Coordinates, gradients, energies and uncertainties carry their own units."""
     centers, trajectories = _harmonic_trajectories()
-    colvar_dir, centers_file = _write_colvars(
-        tmp_path / "energy", centers, trajectories
-    )
-
-    ev = _reconstruct(
-        colvar_dir,
-        centers_file,
-        kappa=KAPPA,
-        cv_unit="nm",
-        energy_unit="eV",
-    )
-    kj = _reconstruct(
-        colvar_dir,
-        centers_file,
-        kappa=KAPPA * ENERGY_SCALE,
-        cv_unit="nm",
-        energy_unit="kJ/mol",
-    )
-
-    assert ev["energy_unit"] == "eV"
-    assert kj["energy_unit"] == "kJ/mol"
-    assert kj["deriv_unit"] == "kJ/mol/nm"
-    _assert_close(kj["lengthscale"], ev["lengthscale"])
-    _assert_close(kj["sigma_f"] / ENERGY_SCALE, ev["sigma_f"])
-    _assert_close(kj["x_star"], ev["x_star"], rtol=0.0, atol=1e-12)
-    for key in (
-        "pmf_mean",
-        "pmf_std",
-        "pmf_std_raw",
-        "pmf_f_std",
-        "pmf_f_std_raw",
-        "deriv_mean",
-        "deriv_std",
-        "deriv_std_raw",
-        "derivative_errors",
-    ):
-        _assert_close(kj[key] / ENERGY_SCALE, ev[key])
-    _assert_close(kj["loo_z"], ev["loo_z"], atol=2e-7)
-    _assert_close(
-        kj["uncertainty_calibration_factor"],
-        ev["uncertainty_calibration_factor"],
-        rtol=5e-4,
-    )
-
-
-def test_cv_unit_rescaling_preserves_reconstruction(tmp_path: Path) -> None:
-    """Changing nm to angstrom rescales coordinates and inverse-square kappa."""
-    centers, trajectories = _harmonic_trajectories()
-    nm_dir, nm_centers = _write_colvars(tmp_path / "nm", centers, trajectories)
-    angstrom_dir, angstrom_centers = _write_colvars(
-        tmp_path / "angstrom",
-        centers * COORDINATE_SCALE,
-        [positions * COORDINATE_SCALE for positions in trajectories],
-    )
-
-    nm = _reconstruct(
-        nm_dir,
-        nm_centers,
-        kappa=KAPPA,
-        cv_unit="nm",
-        energy_unit="eV",
-    )
-    angstrom = _reconstruct(
-        angstrom_dir,
-        angstrom_centers,
-        kappa=KAPPA / COORDINATE_SCALE**2,
-        cv_unit="angstrom",
-        energy_unit="eV",
-    )
-
-    assert nm["cv_unit"] == "nm"
-    assert angstrom["cv_unit"] == "angstrom"
-    assert angstrom["deriv_unit"] == "eV/angstrom"
-    _assert_close(
-        angstrom["lengthscale"] / COORDINATE_SCALE,
-        nm["lengthscale"],
-    )
-    _assert_close(angstrom["sigma_f"], nm["sigma_f"])
+    fits = []
+    for name, e, x in [("base", 1., 1.), ("scaled", energy, coordinate)]:
+        directory, center_file = _write_colvars(
+            tmp_path / name, centers * x, [q * x for q in trajectories])
+        fits.append(reconstruct_pmf_1d(
+            colvar_dir=str(directory), centers=str(center_file), kappa=KAPPA * e / x**2,
+            cv_unit="nm" if x == 1 else "angstrom",
+            energy_unit="eV" if e == 1 else "kJ/mol",
+            optimize_hyperparams=True, plot=False, save_outputs=False, verbose=False))
+    base, scaled = fits
+    assert base["energy_unit"] == "eV" and base["cv_unit"] == "nm"
+    assert scaled["energy_unit"] == ("eV" if energy == 1 else "kJ/mol")
+    assert scaled["cv_unit"] == ("nm" if coordinate == 1 else "angstrom")
+    assert scaled["deriv_unit"] == f'{scaled["energy_unit"]}/{scaled["cv_unit"]}'
     for key in ("x_centers", "x_means", "x_star"):
-        _assert_close(
-            angstrom[key] / COORDINATE_SCALE,
-            nm[key],
-            rtol=1e-8,
-            atol=2e-10,
-        )
-    for key in (
-        "pmf_mean",
-        "pmf_std",
-        "pmf_std_raw",
-        "pmf_f_std",
-        "pmf_f_std_raw",
-    ):
-        _assert_close(angstrom[key], nm[key])
-    for key in (
-        "derivatives",
-        "derivative_errors",
-        "deriv_mean",
-        "deriv_std",
-        "deriv_std_raw",
-    ):
-        _assert_close(angstrom[key] * COORDINATE_SCALE, nm[key])
-    _assert_close(angstrom["loo_z"], nm["loo_z"], atol=2e-7)
-    _assert_close(
-        angstrom["uncertainty_calibration_factor"],
-        nm["uncertainty_calibration_factor"],
-        rtol=5e-4,
-    )
+        np.testing.assert_allclose(scaled[key] / coordinate, base[key],
+                                   rtol=0. if coordinate == 1 else 1e-8,
+                                   atol=1e-12 if coordinate == 1 else 2e-10)
+    groups = [
+        (coordinate, ["lengthscale"]),
+        (energy, ["sigma_f", "pmf_mean", "pmf_std", "pmf_std_raw", "pmf_f_std", "pmf_f_std_raw"]),
+        (energy / coordinate, ["derivatives", "derivative_errors", "deriv_mean", "deriv_std", "deriv_std_raw"]),
+        (1., ["loo_z", "uncertainty_calibration_factor"]),
+    ]
+    for factor, keys in groups:
+        for key in keys:
+            np.testing.assert_allclose(scaled[key] / factor, base[key], rtol=5e-4, atol=2e-7)

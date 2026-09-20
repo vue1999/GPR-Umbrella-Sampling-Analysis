@@ -1,366 +1,221 @@
-# GPR Umbrella Integration
+# GPR umbrella integration
 
-Gaussian-process regression (GPR) umbrella integration for one- and
-two-dimensional PLUMED umbrella-sampling outputs. This package implements the method described in
+Reconstruct one- or two-dimensional free-energy surfaces from harmonic umbrella
+sampling using Gaussian processes conditioned on window mean forces. The method
+is based on [Stecher, Bernstein and Csányi (2014)](https://doi.org/10.1021/ct500438v).
+The fitted free energy is defined up to an additive constant.
 
-> T. Stecher, N. Bernstein, and G. Csányi, "Free Energy Surface Reconstruction from Umbrella Samples Using Gaussian Process Regression," *J. Chem. Theory Comput.* **2014**, *10* (9), 4079–4097. [doi:10.1021/ct500438v](https://doi.org/10.1021/ct500438v)
-
-and is tailored to PLUMED `window_*.ui_dat` files. Specifically, it implements the
-gradient-based reconstruction variant referred to as **GPR(d)** in that paper:
-mean forces are estimated per umbrella window (Sec. 2.3, eq 15), their statistical
-noise is propagated into the likelihood (Sec. 4, eq 37), and the free-energy profile
-is reconstructed by GPR on the derivative observations using a squared-exponential
-kernel (Sec. 4–4.1).
-
-## Features
-
-- Computes mean force and uncertainty from umbrella windows
-- Estimates autocorrelation time for effective sample size
-- Optimizes GP hyperparameters by marginal likelihood
-- Produces PMF and derivative predictions with uncertainties
-- Retains cross-component sampling covariance in two-CV windows
-- Propagates GP covariance into relative barriers and path marginals
-- Finds lowest-barrier grid paths and transverse Boltzmann marginals
-- Generates a multi-panel diagnostics figure
-- Reads raw PLUMED COLVAR files directly (no preprocessing required)
-- Configurable units (energy, collective-variable axis)
-
-## Installation
+## Installation and examples
 
 ```bash
-pip install -e .
+pip install -e '.[test]'
+python examples/run_synthetic_demo.py
+python examples/run_synthetic_2d_demo.py
+pytest
 ```
 
-## Quick Start
+The examples generate known analytic surfaces without simulation input. The
+`examples/fe_h_desorption/` directory also contains a complete 1D COLVAR example.
+The package requires NumPy, SciPy and Matplotlib; pytest is a test dependency.
 
-### From COLVAR files
-
-Supply a directory of `COLVAR_window_*.dat` files together with force-constant
-information.  For a single kappa shared across all windows, provide a centres
-file:
-
-```bash
-gpr-umbrella --colvar-dir COLVAR --kappa 24.305 \
-             --centers window_centers.txt --cv-unit nm
-```
-
-Or from Python:
+## 1D reconstruction
 
 ```python
 from gpr_umbrella import reconstruct_pmf_1d
 
-results = reconstruct_pmf_1d(
-    colvar_dir="COLVAR",
-    kappa=24.305,                    # eV/nm^2
-    centers="window_centers.txt",    # one centre per line
-    cv_unit="nm",
-    energy_unit="eV",
-    output_dir="outputs",
-    output_prefix="my_system",
-    show=False,
+result = reconstruct_pmf_1d(
+    colvar_dir="COLVAR", kappa=24.305, centers="window_centers.txt",
+    cv_unit="nm", energy_unit="eV", output_dir="outputs", show=False,
 )
 ```
 
-If each window has its own kappa, point to a directory of per-window files
-instead:
+Use `kappa_dir="window_kappa"` instead of `kappa`/`centers` for per-window
+restraints, or `data_folder="processed"` for `window_*.ui_dat` files.
 
 ```bash
-gpr-umbrella --colvar-dir COLVAR --kappa-dir window_kappa/
+gpr-umbrella --colvar-dir COLVAR --kappa 24.305 \
+    --centers window_centers.txt --cv-unit nm
 ```
 
-### From preprocessed window files
+COLVAR files are named `COLVAR_window_<i>.dat`; the CV column defaults to index
+1 after time. Per-window `window_centers_kappa_<i>.txt` files contain a centre
+and force constant. Processed `.ui_dat` files contain sample, centre and kappa;
+their kappa is interpreted in kJ/mol/CV². For raw COLVAR inputs, force constants
+use the requested energy unit unless `kappa_in_kj_per_mol=True` / `--kappa-kj`.
 
-```bash
-gpr-umbrella --data-folder /path/to/processed_data
-```
+Outputs are `*_pmf_gpr.dat`, `*_deriv_gpr.dat` and `*_gpr_analysis.png`.
+The original documented imports remain available:
 
 ```python
-results = reconstruct_pmf_1d(
-    data_folder="/path/to/processed_data",
-    output_dir="outputs",
-    output_prefix="my_system",
-    show=False,
+from gpr_umbrella_1d import (
+    gpr_umbrella_integration, load_plumed_colvar_data, load_window_data,
 )
 ```
 
-## Input Data Formats
+`gpr_umbrella_integration` forwards to `reconstruct_pmf_1d`; the existing
+`gpr-umbrella` command remains unchanged.
 
-### COLVAR files
+## 2D reconstruction
 
-Standard PLUMED `COLVAR_window_*.dat` files with columns for `time` and the
-collective variable.  The CV column index can be set with `--cv-col` (default 1).
+Each window applies one separable harmonic restraint per CV. Its free-energy
+gradient estimate is `kappa * (centre - sampled_mean)`, evaluated at the sampled
+mean. A squared-exponential derivative GP reconstructs a scalar surface from
+these vector observations. Each coordinate has its own lengthscale and unit.
 
-Force constant and window centres can be provided in two ways:
+Input files:
 
-1. **Single kappa** (`--kappa`) + a centres file (`--centers`) listing one
-   centre per line.
-2. **Per-window kappa directory** (`--kappa-dir`) containing
-   `window_centers_kappa_*.txt` files with `centre, kappa` on each data line.
+- `COLVAR_window_<i>.dat`: time, CV0, CV1 (column indices configurable).
+- `window_centers_kappa_<i>.txt`: one data row `centre0 centre1 kappa0 kappa1`.
 
-By default, kappa is expected in `energy_unit/CV_unit²` (eV/CV_unit² with the
-defaults). Pass `--kappa-kj` if values are in kJ/mol/CV_unit² (PLUMED
-convention); they are then converted to the selected numerical `energy_unit`.
-
-### window_*.ui_dat files
-
-Each file must contain at least three numeric columns:
-
-1. reaction coordinate samples
-2. window centre (constant per file)
-3. force constant kappa in kJ/mol/CV_unit² (constant per file)
-
-## Outputs
-
-- `*_pmf_1d.dat`: reaction coordinate, PMF mean, PMF uncertainty
-- `*_mean_force_1d.dat`: reaction coordinate, mean force, mean force uncertainty
-- `*_diagnostics_1d.png`: diagnostics figure
-
-## Example
-
-See `examples/fe_h_desorption/` for a complete example using COLVAR data from
-an Fe-surface H-desorption umbrella sampling simulation (36 windows with
-per-window force constants):
-
-```bash
-cd examples/fe_h_desorption
-python run_gpr.py
-```
-
-## 2D umbrella integration
-
-`gpr_umbrella.integration_2d` extends the same scheme to a separable-bias 2-CV setup
-(e.g. H–H distance × relative-z desorption umbrella sampling). Each window
-applies one harmonic restraint per CV, so it yields a 2-vector mean-force
-estimate `kappa_d * (center_d - <x_d>)`. A Gaussian process with a separable
-squared-exponential kernel is conditioned on this **gradient field** (a
-derivative-observation GP, using the same kernel derivatives as the 1D code) to
-reconstruct the scalar 2D PMF up to an additive constant, with LOO-calibrated
-uncertainty.
-
-The two CV components from one window are treated as a correlated vector
-observation. Multivariate batch means estimate their full covariance, which is
-propagated through the force constants and retained as a 2x2 likelihood block.
-Raw GP uncertainty and the LOO-scaled uncertainty are both reported.
-
-Expected per-window inputs (written by `desorption_2dUS/ui_md_umbrella_2d.py`):
-
-- `COLVAR_window_<i>.dat` with columns `time, cv0, cv1` (CV columns set by
-  `--cv-cols`, default `1 2`).
-- `window_centers_kappa_<i>.txt` with one data line `c0, c1, kappa0, kappa1`.
-
-```bash
-# CLI
-gpr-umbrella-2d --colvar-dir COLVAR --kappa-dir COLVAR \
-                --cv-names hh relz --cv-units A A
-
-# or from Python
+```python
 from gpr_umbrella import reconstruct_pmf_2d
-res = reconstruct_pmf_2d(colvar_dir="COLVAR", kappa_dir="COLVAR")
-```
 
-Outputs: `*_pmf_2d.dat` (cv0, cv1, PMF, raw sigma, calibrated sigma,
-sampling-support flag, and path-valid flag on a grid),
-`*_pmf_2d.png` (PMF contour + uncertainty, window centres overlaid) and
-`*_diagnostics_2d.png` — an 8-panel sampling/fit diagnostics figure (PMF and
-calibrated uncertainty; window drift centre→mean, mean-force field, and
-autocorrelation time; window-overlap ellipses, per-observation LOO z-scores,
-and the LOO calibration histogram). Pass `plot_diagnostics=False`
-(CLI: `--no-diagnostics`) to skip it.
-
-The 2D colour scale and path-valid region use one shared, observation-anchored
-policy:
-
-- Geometric support is the union of circles or axis-aligned ellipses centred at
-  sampled window means. Their semiaxes are `support_radius * lengthscale`.
-- `support_radius=0.5` is the default. It is deliberately local: it does not
-  fill a convex hull or bridge disconnected groups of windows.
-- The normal PMF colour interval contains the complete PMF range evaluated at
-  window means plus a fixed 25% margin.
-- Cells outside geometric support are blank. Supported PMF values outside the
-  normal interval are red and excluded from path analysis.
-- The path-valid mask is finite PMF ∩ geometric support ∩ normal PMF interval.
-  No additional uncertainty cutoff is applied.
-
-Use `--support-radius R` for data with different window spacing. The existing
-`--no-restrict-to-sampled-support` escape hatch restores rectangular geometric
-support, while the non-red PMF-range check remains active.
-
-Run the self-contained synthetic check with:
-
-```bash
-python examples/run_synthetic_2d_demo.py
-```
-
-### Sampling blocks and additional force uncertainty
-
-The 2D fitter separates three quantities: the covariance estimated from each
-trajectory, optional unresolved window-to-window force scatter, and small
-numerical diagonal regularization.
-
-```python
-res = reconstruct_pmf_2d(
-    colvar_dir="COLVAR",
-    covariance_block_size=4000,  # saved frames: 10 ps if frames are 2.5 fs apart
-    fit_extra_noise=True,
-    # extra_noise_scale=(scale_cv0, scale_cv1),  # optional energy/CV units
-    # sigma_f_max=...,                         # optional energy-unit cap
+surface = reconstruct_pmf_2d(
+    colvar_dir="COLVAR", kappa_dir="COLVAR",
+    cv_names=("distance", "height"), cv_units=("A", "A"), energy_unit="eV",
+    fit_extra_noise=True, output_dir="outputs",
 )
 ```
 
-Equivalent CLI options are `--covariance-block-size 4000 --fit-extra-noise`,
-with optional `--extra-noise-scale SCALE0 SCALE1` and `--sigma-f-max VALUE`.
-No system-specific block time, gradient scale, or energy cap is hard-coded.
-
-- `covariance_block_size=None` keeps autocorrelation-adaptive blocks. An
-  explicit size uses nonoverlapping blocks, retains the full 2×2 covariance,
-  and requires at least four complete blocks per window. A trailing incomplete
-  block is excluded from the covariance estimate; all frames still determine
-  the mean force. Compare several block sizes: a short CV autocorrelation
-  time is not proof that a slow surrounding configuration has equilibrated.
-- `fit_extra_noise=False` retains the sampling-only statistical model. When
-  enabled, two independent gradient standard deviations are fitted in the
-  likelihood, one per CV. Their half-normal prior scales default to each
-  component's RMS measured gradient including its sampling variance. Explicit
-  positive scales may be supplied in energy/CV units. These scales transform
-  with the physical units. Extra noise describes residual inconsistency;
-  it does not correct biased sampling or establish equilibrium.
-- Numerical jitter is fixed from the input sampling variance, with a tiny
-  data-derived fallback for zero-variance components. It does not increase
-  with fitted signal amplitude or fitted discrepancy. The same covariance is
-  used for the objective, posterior and leave-one-window-out diagnostics.
-- Optimization uses analytic derivatives and six dimensionless multistart
-  initializations. Complete optimizer failure raises an error rather than
-  returning a silently substituted initial estimate.
-- `sigma_f_max=None` means **no additional amplitude cap**. Broad numerical
-  search bounds remain, derived from the data as before. A user-supplied cap
-  is an explicit prior constraint in energy units; it is validated and
-  recorded. No automatic cap is inferred from a guessed reaction barrier.
-
-Results retain `gradient_noise_cov` for sampling covariance and separately
-provide `extra_noise`, `observation_noise_cov`, `numerical_jitter` and
-`optimization`. The standard diagnostics report the block setting and fitted
-extra noise; `*_fit_metadata.json` records all starts, prior scales, bounds and
-bound hits. LOO scaling remains available but is a post-fit diagnostic, not a
-replacement for modeling force noise in the likelihood. It holds fitted
-hyperparameters fixed and does not test independently repeated configurations.
-
-### Path analysis and path-aligned marginal PMFs
-
-#### At a glance
-
-- **Free search:** `--path-mode search --path-endpoints X0 Y0 X1 Y1`
-  - Both endpoints are required.
-  - Each coordinate is snapped only to its nearest grid cell.
-  - Invalid, coincident, or disconnected endpoint cells are rejected.
-- **Reference corridor:** `--path-mode corridor --path-reference PATH
-  --path-corridor-radius R`
-  - The first and last reference points define the endpoints.
-  - Search is limited to the path-valid cells within `R` of the reference.
-- **Fixed trajectory:** `--path-mode fixed --path-reference PATH`
-  - No graph search is performed.
-  - The densified trajectory is evaluated directly and rejected if any part
-    leaves the path-valid region.
-- **Path metric:** fitted GP lengthscales by default; override with
-  `--path-metric-scales SCALE0 SCALE1`.
-- **Optional 1D marginal:** add `--path-aligned-marginal --thermal-energy KBT`.
-- **Reported barrier:** `max(path PMF) - min(path PMF)`, with uncertainty from
-  the full GP posterior covariance between those extrema.
-
-#### Free search
-
 ```bash
 gpr-umbrella-2d --colvar-dir COLVAR --kappa-dir COLVAR \
-    --find-lowest-barrier-path --path-mode search \
-    --path-endpoints X0 Y0 X1 Y1
+    --cv-names distance height --cv-units A A --fit-extra-noise
 ```
 
-Search and corridor modes find the narrowest PMF interval `[F_low, F_high]`
-that contains both endpoints and connects them through path-valid cells. This
-exactly minimizes `F_high - F_low` on the finite 8-neighbour grid. It is not a
-guarantee for the continuous GPR surface and is not a string or NEB refinement.
+For in-memory input, provide `data` instead of `colvar_dir`:
 
-Within that exact interval, one deterministic representative path minimizes
-lengthscale-scaled length with a fixed gradient-alignment penalty. Motion
-perpendicular to a reliable local GP gradient is penalized; the penalty fades
-where the predicted gradient is weak. There is no user-facing gradient weight
-or uncertainty/UCB path-selection parameter.
+```python
+surface = reconstruct_pmf_2d(data={
+    "centers": centers,          # shape (n_windows, 2)
+    "kappa": force_constants,    # shape (n_windows, 2)
+    "all_positions": trajectories,  # list of (n_frames, 2) arrays
+})
+```
 
-Python usage follows the same contract:
+Window means, variances and sample counts are derived from trajectories. An
+optional `window_files` list supplies labels. Input arrays are not modified.
+Force constants are in `energy_unit / cv_units[d]²`; gradients are in
+`energy_unit / cv_units[d]`. Labels alone do not convert coordinate values.
+
+Outputs include the PMF grid, raw and calibrated uncertainty, support masks,
+fit metadata, a PMF/uncertainty figure, and the full diagnostic figure. The
+latter keeps its three-row layout: PMF and uncertainty; target-to-mean drift,
+mean-force field and autocorrelation; sampling ellipses, component LOO scores
+and their histogram. The header records lengthscales, amplitude, covariance
+blocks, additional noise and calibration. Use `--no-diagnostics` to skip it.
+
+### Sampling covariance and additional force noise
+
+The likelihood separates sampling covariance, optional unresolved force scatter,
+and numerical regularization:
+
+- Multivariate batch means retain the full within-window 2×2 covariance.
+  `covariance_block_size=None` uses autocorrelation-adaptive blocks. An explicit
+  size is in saved frames and requires at least four complete blocks/window.
+  A trailing incomplete block is omitted from covariance estimation; every
+  frame still contributes to the mean force.
+- `fit_extra_noise=True` fits a separate additional gradient standard deviation
+  for each CV. Half-normal prior scales default to the RMS observed gradients,
+  including sampling variance. `extra_noise_scale=(s0, s1)` overrides them in
+  energy/CV units. The default remains `fit_extra_noise=False`.
+- Numerical jitter is fixed from the data, independent of fitted amplitude or
+  additional noise. The objective, posterior and LOO use the same covariance.
+- Optimization uses analytic derivatives and six deterministic, dimensionless
+  starts. Only successful starts are eligible; complete failure raises an error.
+- `fixed_lengthscale=(ell0, ell1)` and `fixed_sigma_f=value` fix parameters.
+  `sigma_f_max=None` adds no amplitude cap. An explicit cap is validated and
+  recorded; broad data-scaled numerical bounds remain in either case.
+
+For example, `covariance_block_size=4000` means 10 ps if saved frames are 2.5 fs
+apart. The equivalent CLI flags are `--covariance-block-size 4000`,
+`--extra-noise-scale S0 S1`, `--lengthscales L0 L1` and `--sigma-f-max VALUE`.
+No block time, physical lengthscale or expected barrier is hard-coded.
+
+Results expose `gradient_noise_cov`, `extra_noise`, `observation_noise_cov`,
+`numerical_jitter` and `optimization`. `*_fit_metadata.json` records all starts,
+prior scales, bounds and bound hits. Whole-window LOO calibration is a post-fit
+diagnostic at fixed hyperparameters. Raw and calibrated errors remain available.
+Additional noise does not correct biased sampling or establish equilibration;
+compare block sizes and independent samples to assess those limitations.
+
+### Support and display
+
+The existing shared support/display policy is preserved:
+
+- Geometric support is the union of ellipses at sampled means, with semiaxes
+  `support_radius * lengthscale`; `support_radius=0.5` by default.
+- The ordinary colour interval spans PMFs at window means plus a 25% margin.
+  Unsupported regions are blank; supported values outside that interval are red.
+- Paths require finite PMF, geometric support and the ordinary colour interval.
+  There is no additional uncertainty threshold and no bridging of support gaps.
+
+`--no-restrict-to-sampled-support` restores rectangular geometric support but
+retains the colour-interval validity check. `--support-radius R` changes the
+neighborhood size. Support depends on fitted lengthscales and window spacing.
+
+## Path analysis
+
+Reconstruct first, then call the standalone path function:
 
 ```python
 from gpr_umbrella import find_lowest_barrier_path
+from gpr_umbrella.pathways import save_lowest_barrier_path
+from gpr_umbrella.plotting_2d import plot_lowest_barrier_path
 
 path = find_lowest_barrier_path(
-    result,
-    endpoints=((x_start, y_start), (x_end, y_end)),
+    surface, path_mode="fixed", reference_path=reference_xy,
 )
+save_lowest_barrier_path(path, "path.dat")
+plot_lowest_barrier_path(surface, path, output_path="path.png")
 ```
 
-#### Reference trajectories
+Three modes share profile evaluation and covariance-aware uncertainty:
 
-The reference file may contain `#` comments; its first two columns are the two
-CV coordinates.
+| Mode | Required input | Behavior |
+|---|---|---|
+| `fixed` | `reference_path` | Evaluate the supplied curve; preserve vertices and endpoints; reject unsupported segments |
+| `search` | `endpoints=((x0,y0),(x1,y1))` | Find the minimum-energy-range supported grid path |
+| `corridor` | `reference_path`, `corridor_radius` | Run the same search within a corridor around the curve |
+
+Search endpoints snap to the nearest grid points, which must be valid; they do
+not move to local minima or umbrella centres. Requested and snapped endpoints
+are recorded. Corridor mode uses the reference endpoints. The search minimizes
+`max(F) - min(F)` exactly on the supported eight-neighbor graph; a deterministic
+gradient-aligned tie-break selects a representative within the optimal interval.
+It does not minimize only the highest energy or an uncertainty-penalized score.
+
+The default path metric scales each CV by its fitted GP lengthscale. Override
+with `metric_scale=(scale0, scale1)`; arc length and corridor radius are
+dimensionless in that metric. A reference curve need not pass through windows,
+but it must lie inside the supported region. No smoothing changes that curve.
+
+Both quantities are reported explicitly in energy units:
+
+- `energy_range = max(F) - min(F)` along the path.
+- `endpoint_to_max = max(F) - F(start)` for the forward endpoint rise.
+
+Each has `_err_raw`, `_err_calibrated` and configured `_err` values, using full
+GP covariance for free-energy differences. These uncertainties condition on the
+chosen path, fitted parameters and its selected extrema; they do not marginalize
+over alternative paths or transition-state locations.
 
 ```bash
-# Search only within a dimensionless path-metric radius of the reference.
-gpr-umbrella-2d --colvar-dir COLVAR --kappa-dir COLVAR \
-    --find-lowest-barrier-path --path-mode corridor \
-    --path-reference neb_xy.dat --path-corridor-radius 0.5
-
-# Evaluate the reference exactly, with no graph search.
-gpr-umbrella-2d --colvar-dir COLVAR --kappa-dir COLVAR \
-    --find-lowest-barrier-path --path-mode fixed \
-    --path-reference neb_xy.dat
+gpr-umbrella-2d --colvar-dir COLVAR --fit-extra-noise \
+    --find-lowest-barrier-path --path-mode fixed --path-reference curve.dat
 ```
 
-The corridor radius is dimensionless in the path metric. With isotropic metric
-scale 0.5 A, for example, radius 0.5 corresponds to 0.25 A. Disconnected
-corridors and invalid fixed trajectories fail explicitly instead of crossing,
-clipping, or rerouting through untrusted cells.
+For search use `--path-mode search --path-endpoints X0 Y0 X1 Y1`; for a corridor
+use `--path-mode corridor --path-reference curve.dat --path-corridor-radius R`.
+Path tables include compact JSON metadata in their comment header.
 
-#### Path-aligned 1D marginal
+## Migration and citation
 
-```bash
-gpr-umbrella-2d --colvar-dir COLVAR --kappa-dir COLVAR \
-    --find-lowest-barrier-path --path-mode search \
-    --path-endpoints X0 Y0 X1 Y1 \
-    --path-aligned-marginal --thermal-energy 0.02585
-```
+See [MIGRATION.md](MIGRATION.md) for changes from the full experimental branch.
+Projected-arclength MBAR/GPR and transverse marginalization remain preserved on
+`codex/noise-aware-2d` at `2d03bc3`, outside this package's current scope.
 
-`--thermal-energy` is `kBT` in `energy_unit`. The path coordinate and transverse
-coordinate are dimensionless metric arclengths. `--perpendicular-points` and
-`--perpendicular-width` control the transverse quadrature. Outputs are written
-to `*_lowest_barrier_path.dat`, `*_lowest_barrier_path.png`, and
-`*_path_aligned_pmf_1d.dat`.
-
-### Path implementation structure
-
-- `support.py` owns sampled-support geometry and the shared display/path-valid
-  policy.
-- `path_graph.py` owns exact finite-grid minimum-range search and the fixed
-  gradient-aware tie-break.
-- `trajectory.py` validates, densifies, and measures reference trajectories.
-- `path_profile.py` evaluates path PMFs and covariance-aware differences.
-- `pathways.py` orchestrates modes and optional transverse marginalization.
-
-## Citation
-
-This implementation is based on the method introduced in:
-
-> T. Stecher, N. Bernstein, and G. Csányi, "Free Energy Surface Reconstruction from Umbrella Samples Using Gaussian Process Regression," *J. Chem. Theory Comput.* **2014**, *10* (9), 4079–4097. [doi:10.1021/ct500438v](https://doi.org/10.1021/ct500438v)
-
-If you use this tool in published work, please cite the paper above and acknowledge
-this implementation.
-
-A closely related follow-up paper extends the same GPR-based reconstruction to combined
-exploration + sampling (metadynamics biasing with an instantaneous-collective-force
-gradient estimator, reconstructed with GPR):
-
-> L. Mones, N. Bernstein, and G. Csányi, "Exploration, Sampling, And Reconstruction of Free Energy Surfaces with Gaussian Process Regression," *J. Chem. Theory Comput.* **2016**, *12* (10), 5100–5110. [doi:10.1021/acs.jctc.6b00553](https://doi.org/10.1021/acs.jctc.6b00553)
-# Robust projected-path fitting
-
-For 2D-biased trajectories projected onto an ordered NEB, see
-[Robust arclength SE GPR](ROBUST_PATH_GPR.md). The new `gpr-umbrella-path`
-entry point retains the original 2D bias energies, uses correlated block
-uncertainties and resolution-aware SE fitting, and preserves the existing
-diagnostic plot style. A successful optimiser is not an acceptance criterion.
+Please cite T. Stecher, N. Bernstein and G. Csányi, *J. Chem. Theory Comput.*
+**2014**, 10, 4079–4097, [doi:10.1021/ct500438v](https://doi.org/10.1021/ct500438v).
+A related extension is L. Mones, N. Bernstein and G. Csányi, *J. Chem. Theory
+Comput.* **2016**, 12, 5100–5110,
+[doi:10.1021/acs.jctc.6b00553](https://doi.org/10.1021/acs.jctc.6b00553).

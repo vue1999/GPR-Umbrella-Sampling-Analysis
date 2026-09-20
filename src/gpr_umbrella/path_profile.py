@@ -55,7 +55,11 @@ def evaluate_path_profile(
     energy: np.ndarray | None = None,
     latent_variance: np.ndarray | None = None,
 ) -> dict:
-    """Return energies, landmarks, and correlated errors for one path."""
+    """Return a profile, energy range, and forward endpoint rise with GP errors.
+
+    Errors condition on the fitted hyperparameters and selected extrema. They
+    include covariance between reference and maximum, not extrema uncertainty.
+    """
     points = np.asarray(points, dtype=float)
     metric_scale = np.asarray(metric_scale, dtype=float)
     if points.ndim != 2 or points.shape[1] != 2 or len(points) < 2:
@@ -111,10 +115,14 @@ def evaluate_path_profile(
         "path_min_pmf": float(energy[minimum]),
         "bottleneck_energy": float(energy[maximum]),
         "path_metric_length": float(s[-1]),
-        "barrier": float(relative_minimum[maximum]),
-        "barrier_err_raw": float(min_raw[maximum]),
-        "barrier_err_calibrated": float(min_calibrated[maximum]),
-        "barrier_err": float(min_default[maximum]),
+        "energy_range": float(relative_minimum[maximum]),
+        "energy_range_err_raw": float(min_raw[maximum]),
+        "energy_range_err_calibrated": float(min_calibrated[maximum]),
+        "energy_range_err": float(min_default[maximum]),
+        "endpoint_to_max": float(relative_start[maximum]),
+        "endpoint_to_max_err_raw": float(start_raw[maximum]),
+        "endpoint_to_max_err_calibrated": float(start_calibrated[maximum]),
+        "endpoint_to_max_err": float(start_default[maximum]),
         "delta_f": float(relative_start[-1]),
         "delta_f_err_raw": float(start_raw[-1]),
         "delta_f_err_calibrated": float(start_calibrated[-1]),

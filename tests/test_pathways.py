@@ -1,4 +1,4 @@
-"""Focused tests for lowest-barrier paths and path-aligned marginals."""
+"""Grid search, fixed references, support, and covariance-aware path differences."""
 from __future__ import annotations
 
 import numpy as np
@@ -13,10 +13,8 @@ from gpr_umbrella.integration_2d import (
 )
 from gpr_umbrella.path_graph import minimum_energy_interval, minimum_range_path
 from gpr_umbrella.pathways import (
-    _supported_segment,
     find_lowest_barrier_path,
     save_lowest_barrier_path,
-    save_path_aligned_marginal,
 )
 
 
@@ -86,7 +84,6 @@ def _analytic_results():
         "energy_unit": "kJ/mol",
         "_gp_state": state,
     }
-
 
 
 def _brute_minimum_interval(pmf, support, start, end):
@@ -176,22 +173,6 @@ def test_path_metric_scale_must_be_finite(metric_scale):
             endpoints=((-1.0, 0.0), (1.0, 0.0)),
             metric_scale=metric_scale,
         )
-def test_isolated_supported_normal_point_is_not_extended_into_extrapolation():
-    coordinate = np.linspace(-1.0, 1.0, 5)
-    points = np.column_stack([np.zeros(5), coordinate])
-    supported = np.array([False, False, True, False, False])
-
-    with pytest.raises(ValueError, match="supported perpendicular interval"):
-        _supported_segment(coordinate, points, supported)
-
-
-def test_supported_segment_stops_at_an_internal_gap():
-    coordinate = np.linspace(-2.0, 2.0, 5)
-    points = np.column_stack([np.zeros(5), coordinate])
-    supported = np.array([True, False, True, True, True])
-
-    kept_coordinate, _ = _supported_segment(coordinate, points, supported)
-    np.testing.assert_array_equal(kept_coordinate, np.array([0.0, 1.0, 2.0]))
 
 
 def test_barrier_uses_path_range_and_covariance_between_extrema():
@@ -232,199 +213,19 @@ def test_barrier_uses_path_range_and_covariance_between_extrema():
 
     assert path["path_min_index"] == 2
     assert path["path_min_xy"] == pytest.approx((2.0, 0.0))
-    assert path["barrier"] == pytest.approx(1.2)
+    assert path["energy_range"] == pytest.approx(1.2)
     assert path["delta_f"] == pytest.approx(-0.2)
     np.testing.assert_allclose(path["pmf_rel_path_min"], [0.5, 1.2, 0.0, 0.3])
     assert path["sigma_from_path_min_raw"][2] == 0.0
-    assert path["barrier_err_raw"] == pytest.approx(expected_raw)
-    assert path["barrier_err_calibrated"] == pytest.approx(2.0 * expected_raw)
-    assert path["barrier_err"] == pytest.approx(2.0 * expected_raw)
-    assert path["barrier_err_raw"] < 0.25 * independent_error
-
-
-@pytest.mark.parametrize("thermal_energy", [None, 0.0, -0.1, np.nan])
-def test_path_aligned_marginal_requires_positive_thermal_energy(thermal_energy):
-    results = _analytic_results()
-    with pytest.raises(ValueError, match="thermal_energy"):
-        find_lowest_barrier_path(
-            results,
-            endpoints=((-1.0, 0.0), (1.0, 0.0)),
-            metric_scale=(1.0, 1.0),
-            path_aligned_marginal=True,
-            thermal_energy=thermal_energy,
-            perpendicular_points=11,
-            perpendicular_width=2.0,
-        )
-
-
-@pytest.mark.parametrize("perpendicular_points", [-1, 0, 1, 2])
-def test_path_aligned_marginal_requires_at_least_three_points(
-    perpendicular_points,
-):
-    results = _analytic_results()
-    with pytest.raises(ValueError, match="perpendicular_points"):
-        find_lowest_barrier_path(
-            results,
-            endpoints=((-1.0, 0.0), (1.0, 0.0)),
-            metric_scale=(1.0, 1.0),
-            path_aligned_marginal=True,
-            thermal_energy=0.4,
-            perpendicular_points=perpendicular_points,
-            perpendicular_width=2.0,
-        )
-
-
-@pytest.fixture(scope="module")
-def analytic_marginal_path():
-    return find_lowest_barrier_path(
-        _analytic_results(),
-        endpoints=((-1.0, 0.0), (1.0, 0.0)),
-        metric_scale=(1.0, 1.0),
-        path_aligned_marginal=True,
-        thermal_energy=0.4,
-        perpendicular_points=61,
-        perpendicular_width=2.0,
-    )
-
-
-def _relative_marginal_profile(marginal):
-    profile = np.asarray(marginal.get("pmf_rel", marginal["pmf"]), dtype=float)
-    return profile - np.min(profile)
-
-
-def test_harmonic_perpendicular_integration_recovers_relative_pmf(
-    analytic_marginal_path,
-):
-    r"""For F(s,u)=V(s)+ku²/2, integrating u only adds a constant."""
-    marginal = analytic_marginal_path["path_aligned_marginal"]
-    profile = _relative_marginal_profile(marginal)
-    if "x" in marginal:
-        expected = 0.4 * (np.asarray(marginal["x"]) + 1.0)
-    else:
-        # metric_scale=(1,1), and this path runs horizontally from x=-1.
-        expected = 0.4 * np.asarray(marginal["s"])
-    expected -= expected.min()
-
-    np.testing.assert_allclose(profile, expected, atol=2.5e-2, rtol=0.0)
-    assert profile.min() == pytest.approx(0.0, abs=1e-12)
-    for key in ("sigma_raw", "sigma_calibrated", "sigma"):
-        values = np.asarray(marginal[key])
-        assert values.shape == profile.shape
-        assert np.all(np.isfinite(values))
-        assert np.all(values >= 0.0)
-
-
-def test_corner_stations_with_zero_normal_measure_are_omitted():
-    results = _analytic_results()
-    results["gx"] = np.linspace(-1.0, 1.0, 11)
-    results["gy"] = np.linspace(-1.0, 1.0, 11)
-    results["GX"], results["GY"] = np.meshgrid(
-        results["gx"], results["gy"], indexing="ij"
-    )
-    results["pmf"] = np.zeros((11, 11))
-    results["support_mask"] = np.ones((11, 11), dtype=bool)
-    results["latent_variance_raw"] = _latent_variance_on_grid(
-        results["_gp_state"], results["gx"], results["gy"]
-    )
-
-    path = find_lowest_barrier_path(
-        results,
-        endpoints=((-1.0, -1.0), (1.0, 1.0)),
-        metric_scale=(1.0, 1.0),
-        path_aligned_marginal=True,
-        thermal_energy=0.4,
-        perpendicular_points=31,
-    )
-    marginal = path["path_aligned_marginal"]
-
-    # Boundary stations with a zero-measure normal interval are omitted, while
-    # all remaining stations stay finite. The fixed gradient-aware tie-break
-    # determines which endpoint geometry is encountered.
-    assert len(marginal["s"]) < len(path["s"])
-    assert np.all(np.isfinite(marginal["pmf"]))
-    assert not (
-        np.allclose([marginal["x"][0], marginal["y"][0]], path["start_xy"])
-        and np.allclose(
-            [marginal["x"][-1], marginal["y"][-1]], path["end_xy"]
-        )
-    )
-
-
-def test_coarse_normal_sampling_resolves_one_cell_wide_support():
-    results = _analytic_results()
-    middle = int(np.argmin(np.abs(results["gy"])))
-    results["support_mask"] = np.zeros_like(results["pmf"], dtype=bool)
-    results["support_mask"][:, middle] = True
-
-    path = find_lowest_barrier_path(
-        results,
-        endpoints=((-1.0, 0.0), (1.0, 0.0)),
-        metric_scale=(1.0, 1.0),
-        path_aligned_marginal=True,
-        thermal_energy=0.4,
-        perpendicular_points=3,
-        perpendicular_width=2.0,
-    )
-    marginal = path["path_aligned_marginal"]
-
-    # The initial samples are u=(-2, 0, 2), only one of which lies in the
-    # supported grid-cell strip. Refinement must discover its finite width
-    # rather than dropping every path station or adding an unsupported point.
-    assert len(marginal["s"]) == len(path["s"])
-    assert np.all(marginal["perpendicular_samples"] >= 2)
-    assert np.all(marginal["u_min"] < 0.0)
-    assert np.all(marginal["u_max"] > 0.0)
-    assert np.all(np.isfinite(marginal["pmf"]))
-
-
-def test_path_marginal_is_stable_to_an_underflow_sized_energy_shift(
-    analytic_marginal_path,
-):
-    shifted = _analytic_results()
-    energy_shift = 10_000.0
-    shifted["pmf"] = shifted["pmf"] + energy_shift
-    # Arbitrary-point PMF predictions are referenced by subtracting this GP
-    # value.  Making it negative adds the same large constant everywhere and
-    # would make a direct exp(-F/kBT) calculation underflow to zero.
-    shifted["_gp_state"]["pmf_reference_mean"] -= energy_shift
-    shifted["pmf_reference_mean"] = shifted["_gp_state"]["pmf_reference_mean"]
-    shifted_path = find_lowest_barrier_path(
-        shifted,
-        endpoints=((-1.0, 0.0), (1.0, 0.0)),
-        metric_scale=(1.0, 1.0),
-        path_aligned_marginal=True,
-        thermal_energy=0.4,
-        perpendicular_points=61,
-        perpendicular_width=2.0,
-    )
-
-    baseline = _relative_marginal_profile(
-        analytic_marginal_path["path_aligned_marginal"]
-    )
-    shifted_profile = _relative_marginal_profile(
-        shifted_path["path_aligned_marginal"]
-    )
-    assert np.all(np.isfinite(shifted_profile))
-    np.testing.assert_allclose(shifted_profile, baseline, atol=2e-9, rtol=0.0)
-
-
-def test_path_savers_keep_each_cv_unit_in_mixed_unit_headers(
-    tmp_path, analytic_marginal_path,
-):
-    path_file = tmp_path / "case_lowest_barrier_path.dat"
-    marginal_file = tmp_path / "case_path_aligned_pmf_1d.dat"
-    save_lowest_barrier_path(analytic_marginal_path, str(path_file))
-    save_path_aligned_marginal(
-        analytic_marginal_path["path_aligned_marginal"], str(marginal_file)
-    )
-
-    for output in (path_file, marginal_file):
-        header = output.read_text()
-        assert "distance(nm)" in header
-        assert "angle(rad)" in header
-        assert "kJ/mol" in header
-
-
+    assert path["energy_range_err_raw"] == pytest.approx(expected_raw)
+    assert path["energy_range_err_calibrated"] == pytest.approx(2.0 * expected_raw)
+    assert path["energy_range_err"] == pytest.approx(2.0 * expected_raw)
+    assert path["energy_range_err_raw"] < 0.25 * independent_error
+    endpoint_sigma = np.sqrt(covariance[1, 1] + covariance[0, 0] - 2 * covariance[1, 0])
+    assert path["endpoint_to_max"] == pytest.approx(.7)
+    assert path["endpoint_to_max_err_raw"] == pytest.approx(endpoint_sigma)
+    assert path["endpoint_to_max_err"] == pytest.approx(2 * endpoint_sigma)
+    assert path["endpoint_to_max"] != path["energy_range"]
 
 
 def test_search_requires_explicit_endpoints():
@@ -526,7 +327,7 @@ def test_fixed_reference_path_is_evaluated_without_grid_search():
     assert path["path_objective"] == "fixed_reference_trajectory"
     assert path["start_xy"] == pytest.approx(tuple(reference[0]))
     assert path["end_xy"] == pytest.approx(tuple(reference[-1]))
-    assert path["barrier"] == pytest.approx(
+    assert path["energy_range"] == pytest.approx(
         np.max(path["pmf"]) - np.min(path["pmf"])
     )
     assert any(np.allclose([x, y], reference[1])
@@ -588,3 +389,12 @@ def test_saved_path_header_describes_fixed_objective_without_weights(tmp_path):
     assert "selected energy interval" in header
     assert "gradient weight" not in header
     assert "uncertainty weight" not in header
+
+
+def test_path_output_retains_mixed_coordinate_units(tmp_path):
+    path = find_lowest_barrier_path(
+        _analytic_results(), endpoints=((-1., 0.), (1., 0.)))
+    output = tmp_path / "path.dat"
+    save_lowest_barrier_path(path, str(output))
+    header = output.read_text()
+    assert all(unit in header for unit in ("distance(nm)", "angle(rad)", "kJ/mol"))

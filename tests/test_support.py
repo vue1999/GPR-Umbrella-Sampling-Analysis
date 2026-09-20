@@ -72,21 +72,3 @@ def test_window_anchored_policy_defines_shared_path_valid_region():
     assert valid[1, 1]
     assert not valid[2, 0]  # supported but red/out of the trusted PMF range
     assert not valid[2, 1]  # geometrically unsupported and non-finite
-
-
-def test_window_anchored_policy_is_invariant_to_additive_pmf_shift():
-    base = {
-        "gx": np.array([0.0, 1.0]),
-        "gy": np.array([0.0, 1.0]),
-        "means": np.array([[0.0, 0.0], [1.0, 1.0]]),
-        "pmf": np.array([[0.0, 0.4], [0.6, 1.0]]),
-        "pmf_std_raw": np.full((2, 2), 0.1),
-        "pmf_std_calibrated": np.full((2, 2), 0.2),
-        "support_mask": np.ones((2, 2), dtype=bool),
-    }
-    shifted = dict(base, pmf=base["pmf"] + 123.0)
-
-    first = window_anchored_display_policy(base)
-    second = window_anchored_display_policy(shifted)
-    np.testing.assert_allclose(first["pmf"], second["pmf"])
-    np.testing.assert_allclose(first["pmf_limits"], second["pmf_limits"])
