@@ -6,6 +6,7 @@ import numpy as np
 import pytest
 
 import gpr_umbrella.integration_2d as integration_2d
+from gpr_umbrella.fitting_2d import training_covariance
 
 from gpr_umbrella.integration_2d import (
     _grid_support_mask,
@@ -281,8 +282,8 @@ def test_nll_uses_the_complete_observation_covariance() -> None:
         sl = slice(2 * window, 2 * window + 2)
         noise[sl, sl] = block
 
-    Ky = _with_relative_diagonal_jitter(
-        _k_grad_grad(X, X, params[0], params[1:]) + noise
+    Ky = training_covariance(
+        _k_grad_grad(X, X, params[0], params[1:]), noise, y
     )
     sign, log_determinant = np.linalg.slogdet(Ky)
     assert sign > 0
@@ -380,13 +381,13 @@ def test_posterior_covariance_and_reference_state_drive_pmf_uncertainty() -> Non
     points = np.column_stack([results["GX"].ravel(), results["GY"].ravel()])
 
     # Training uses the complete block covariance, not only its diagonal.
-    training_covariance = _with_relative_diagonal_jitter(
+    expected_training_covariance = training_covariance(
         _k_grad_grad(
             state["X"], state["X"], state["sigma_f"], state["lengthscale"]
         )
-        + results["gradient_noise_cov"]
+        , results["gradient_noise_cov"], results["grad"].ravel()
     )
-    expected_alpha = np.linalg.solve(training_covariance, results["grad"].ravel())
+    expected_alpha = np.linalg.solve(expected_training_covariance, results["grad"].ravel())
     np.testing.assert_allclose(state["alpha"], expected_alpha, rtol=2e-10, atol=2e-11)
 
     covariance = posterior_covariance_2d(results, points)
@@ -396,7 +397,7 @@ def test_posterior_covariance_and_reference_state_drive_pmf_uncertainty() -> Non
     K_query = _k_f_grad(
         points, state["X"], state["sigma_f"], state["lengthscale"]
     )
-    solved = np.linalg.solve(training_covariance, K_query.T)
+    solved = np.linalg.solve(expected_training_covariance, K_query.T)
     expected_covariance = (
         _se(points, points, state["sigma_f"], state["lengthscale"])
         - K_query @ solved

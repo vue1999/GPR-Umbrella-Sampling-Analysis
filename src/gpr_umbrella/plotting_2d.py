@@ -188,6 +188,11 @@ def plot_diagnostics_2d(results: dict, output_path: str | None = None,
     cvn, cvu = results["cv_names"], results["cv_units"]
     eu = results["energy_unit"]
     N = len(centers)
+    extra_noise = np.asarray(results.get("extra_noise", [0., 0.]))
+    block_label = results.get("covariance_block_size")
+    noise_note = (f"blocks = {block_label if block_label is not None else 'adaptive'} frames"
+                  f"  ·  extra gradient SD = ({extra_noise[0]:.3g}, {extra_noise[1]:.3g})"
+                  f" {eu}/CV")
 
     fig = plt.figure(figsize=(15, 12))
     gs = fig.add_gridspec(3, 6, top=0.90, bottom=0.06,
@@ -359,6 +364,8 @@ def plot_diagnostics_2d(results: dict, output_path: str | None = None,
              fontsize=13, fontweight="bold")
     fig.text(0.5, 0.935, setup, ha="center", va="top",
              fontsize=9.5, color="#333333")
+
+    fig.text(0.5, 0.915, noise_note, ha="center", fontsize=8)
 
     if output_path:
         fig.savefig(output_path, dpi=150, bbox_inches="tight")

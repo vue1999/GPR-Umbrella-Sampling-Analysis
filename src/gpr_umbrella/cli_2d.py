@@ -34,6 +34,14 @@ def build_parser() -> argparse.ArgumentParser:
                    metavar=("ELL0", "ELL1"),
                    help="Fix one GP lengthscale per CV")
     p.add_argument("--sigma-f", type=float, default=None)
+    p.add_argument("--covariance-block-size", type=int, default=None, metavar="FRAMES",
+                   help="Explicit covariance block length in saved frames; requires at least four blocks/window")
+    p.add_argument("--fit-extra-noise", action="store_true",
+                   help="Fit independent window-gradient discrepancy in each CV")
+    p.add_argument("--extra-noise-scale", type=float, nargs=2, default=None,
+                   help="Half-normal scales in energy/CV units; default is data-derived RMS forces")
+    p.add_argument("--sigma-f-max", type=float, default=None,
+                   help="Optional GP amplitude cap in energy units; unset by default")
     p.add_argument("--no-calibrate", action="store_true")
     p.add_argument("--diagonal-noise", action="store_true",
                    help="Ignore cross-CV covariance within each window")
@@ -130,6 +138,10 @@ def main(argv=None) -> int:
         optimize_hyperparams=not args.no_optimize,
         fixed_lengthscale=(tuple(args.lengthscales) if args.lengthscales else None),
         fixed_sigma_f=args.sigma_f,
+        covariance_block_size=args.covariance_block_size,
+        fit_extra_noise=args.fit_extra_noise,
+        extra_noise_scale=args.extra_noise_scale,
+        sigma_f_max=args.sigma_f_max,
         include_cross_component_covariance=not args.diagonal_noise,
         calibrate_uncertainty=not args.no_calibrate,
         restrict_to_sampled_support=args.restrict_to_sampled_support,

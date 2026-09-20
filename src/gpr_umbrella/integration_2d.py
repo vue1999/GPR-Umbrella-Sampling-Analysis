@@ -138,6 +138,7 @@ def estimate_mean_covariance(
     *,
     batch_factor: float = 5.0,
     min_batches: int = 4,
+    block_size: int | None = None,
 ) -> tuple[np.ndarray, int]:
     """Estimate the covariance matrix of a correlated multivariate mean.
 
@@ -165,12 +166,17 @@ def estimate_mean_covariance(
     if batch_factor <= 0 or min_batches < 2:
         raise ValueError("batch_factor must be positive and min_batches >= 2")
 
-    target = max(1, int(np.ceil(batch_factor * float(np.max(tau_int)))))
+    if block_size is not None:
+        if isinstance(block_size, (bool, np.bool_)) or not isinstance(block_size, (int, np.integer)) or block_size < 1:
+            raise ValueError("block_size must be a positive integer number of frames")
+        if n // block_size < min_batches:
+            raise ValueError("Requested covariance block_size leaves fewer than four blocks")
+    target = block_size if block_size is not None else max(1, int(np.ceil(batch_factor * float(np.max(tau_int)))))
     largest = max(1, n // min_batches)
     batch_size = min(target, largest)
     n_batches = n // batch_size
 
-    if target <= largest and n_batches >= min_batches and batch_size > 1:
+    if target <= largest and n_batches >= min_batches and (batch_size > 1 or block_size is not None):
         used = positions[:n_batches * batch_size]
         batch_means = used.reshape(n_batches, batch_size, d).mean(axis=1)
         mean_cov = np.atleast_2d(np.cov(batch_means, rowvar=False, ddof=1))
@@ -223,6 +229,7 @@ def _gradient_noise_covariance(
     *,
     include_cross_component: bool,
     batch_factor: float,
+    block_size: int | None = None,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Build the block-diagonal covariance of all gradient observations."""
     kappa = np.asarray(kappa, dtype=float)
@@ -239,7 +246,7 @@ def _gradient_noise_covariance(
     batch_sizes = []
     for w, positions in enumerate(all_positions):
         mean_cov, batch_size = estimate_mean_covariance(
-            positions, tau[w], batch_factor=batch_factor
+            positions, tau[w], batch_factor=batch_factor, block_size=block_size
         )
         if not include_cross_component:
             mean_cov = np.diag(np.diag(mean_cov))
@@ -341,7 +348,8 @@ def _nll(params: np.ndarray, X: np.ndarray, y: np.ndarray,
         return 1e12
     n = len(y)
     Kgg = _k_grad_grad(X, X, sigma_f, ell)
-    Ky = _with_relative_diagonal_jitter(Kgg + noise_cov)
+    from .fitting_2d import training_covariance
+    Ky = training_covariance(Kgg, noise_cov, y)
     try:
         L, low = cho_factor(Ky, lower=True)
         alpha = cho_solve((L, low), y)
@@ -353,99 +361,13 @@ def _nll(params: np.ndarray, X: np.ndarray, y: np.ndarray,
 
 def _fit_hyperparameters_2d(X, y, noise_cov, ell_init, ell_upper, sigma_f_init,
                             fixed_lengthscale, fixed_sigma_f, optimize):
-    D = X.shape[1]
-    ell_init = np.atleast_1d(ell_init).astype(float)
-    if ell_init.size == 1:
-        ell_init = np.full(D, ell_init[0])
-    ell_upper = np.broadcast_to(np.asarray(ell_upper, dtype=float), (D,))
-    ell_lower = ell_upper / 3000.0
-
-    if (
-        ell_init.shape != (D,)
-        or np.any(~np.isfinite(ell_init))
-        or np.any(ell_init <= 0)
-        or np.any(~np.isfinite(ell_upper))
-        or np.any(ell_upper <= ell_lower)
-        or not np.isfinite(sigma_f_init)
-        or sigma_f_init <= 0
-    ):
-        raise ValueError("Initial GP hyperparameter scales must be finite and positive")
-
-    fixed_ell = None
-    if fixed_lengthscale is not None:
-        try:
-            fixed_ell = np.broadcast_to(
-                np.asarray(fixed_lengthscale, dtype=float), (D,)
-            ).copy()
-        except ValueError as exc:
-            raise ValueError(f"fixed_lengthscale must be scalar or have shape ({D},)") from exc
-        if np.any(~np.isfinite(fixed_ell)) or np.any(fixed_ell <= 0):
-            raise ValueError("fixed_lengthscale values must be finite and positive")
-    if fixed_sigma_f is not None:
-        fixed_sigma_f = float(fixed_sigma_f)
-        if not np.isfinite(fixed_sigma_f) or fixed_sigma_f <= 0:
-            raise ValueError("fixed_sigma_f must be finite and positive")
-
-    # Nothing free to optimize (both fixed, or optimization disabled).
-    if not optimize or (fixed_sigma_f is not None and fixed_lengthscale is not None):
-        sf = fixed_sigma_f if fixed_sigma_f is not None else sigma_f_init
-        ell = fixed_ell if fixed_ell is not None else ell_init
-        return sf, ell, True
-
-    # Optimize logarithmic, dimensionless ratios. This keeps both bounds and
-    # optimizer geometry unchanged under energy or per-CV unit conversions.
-    def unpack(log_ratios):
-        cursor = 0
-        if fixed_sigma_f is None:
-            sf = sigma_f_init * np.exp(log_ratios[cursor])
-            cursor += 1
-        else:
-            sf = fixed_sigma_f
-        if fixed_ell is None:
-            ell = ell_init * np.exp(log_ratios[cursor:cursor + D])
-        else:
-            ell = fixed_ell
-        return float(sf), np.asarray(ell, dtype=float)
-
-    def pack_nll(log_ratios):
-        sf, ell = unpack(log_ratios)
-        return _nll(np.concatenate([[sf], ell]), X, y, noise_cov)
-
-    # Build bounds for the dimensionless ratios.
-    starts = []
-    bounds = []
-    if fixed_sigma_f is None:
-        bounds.append((np.log(1e-3), np.log(1e3)))
-    if fixed_ell is None:
-        bounds += list(zip(np.log(ell_lower / ell_init),
-                           np.log(ell_upper / ell_init)))
-
-    def make_x0(scale_sf, scale_ell):
-        x0 = []
-        if fixed_sigma_f is None:
-            x0.append(np.log(scale_sf))
-        if fixed_ell is None:
-            x0 += [np.log(scale_ell)] * D
-        x0 = np.asarray(x0, dtype=float)
-        for index, (lower, upper) in enumerate(bounds):
-            x0[index] = np.clip(x0[index], lower, upper)
-        return np.array(x0)
-
-    for s_sf, s_ell in [(1, 1), (0.5, 0.5), (2, 2), (1, 0.5), (0.5, 2)]:
-        starts.append(make_x0(s_sf, s_ell))
-
-    best, best_nll = None, np.inf
-    for x0 in starts:
-        res = minimize(pack_nll, x0=x0, method="L-BFGS-B", bounds=bounds)
-        if res.success and res.fun < best_nll:
-            best_nll, best = res.fun, res.x
-    if best is None:
-        fallback_sigma = fixed_sigma_f if fixed_sigma_f is not None else sigma_f_init
-        fallback_ell = fixed_ell if fixed_ell is not None else ell_init
-        return fallback_sigma, fallback_ell, False
-    sf, ell = unpack(best)
-    return sf, ell, True
-
+    """Compatibility entry point using the native analytic multistart fitter."""
+    from .fitting_2d import fit_hyperparameters
+    sf, ell, _, ok, _ = fit_hyperparameters(
+        X, y, noise_cov, ell_init, ell_upper, sigma_f_init,
+        fixed_lengthscale, fixed_sigma_f, optimize,
+    )
+    return sf, ell, ok
 
 def posterior_covariance_2d(
     results: dict,
@@ -530,6 +452,10 @@ def reconstruct_pmf_2d(
     acf_threshold: float = 0.05,
     include_cross_component_covariance: bool = True,
     covariance_batch_factor: float = 5.0,
+    covariance_block_size: int | None = None,
+    fit_extra_noise: bool = False,
+    extra_noise_scale: float | tuple[float, float] | None = None,
+    sigma_f_max: float | None = None,
     calibrate_uncertainty: bool = True,
     restrict_to_sampled_support: bool = True,
     support_radius: float = 0.5,
@@ -562,8 +488,16 @@ def reconstruct_pmf_2d(
 
     By default plots, path search, and transverse integration are restricted
     to the union of kernel-scaled neighborhoods around sampled window means.
-    ``support_radius`` gives the radius in GP lengthscales. ``path_mode``
-    selects free search between required endpoints, corridor search using a
+    ``support_radius`` gives the radius in GP lengthscales.
+
+    Explicit ``covariance_block_size`` uses blocks in saved frames (at least
+    four per window); None retains autocorrelation-adaptive batches.
+    ``fit_extra_noise`` fits a separate gradient-discrepancy SD per CV with
+    half-normal scales ``extra_noise_scale`` (default: RMS measured gradients,
+    including sampling variance). ``sigma_f_max`` optionally limits the GP
+    amplitude in energy units; no additional cap is imposed by default.
+    Numerical jitter is fixed from the data, independent of fitted parameters.
+    ``path_mode`` selects free search between required endpoints, corridor search using a
     reference trajectory, or direct evaluation of that fixed trajectory.
     """
     if (colvar_dir is None) == (data is None):
@@ -630,6 +564,7 @@ def reconstruct_pmf_2d(
             tau,
             include_cross_component=include_cross_component_covariance,
             batch_factor=covariance_batch_factor,
+            block_size=covariance_block_size,
         )
     )
     grad_err = np.sqrt(np.maximum(np.diag(noise_cov), 0.0)).reshape(N, D)
@@ -682,20 +617,28 @@ def reconstruct_pmf_2d(
             )
         sigma_f_init = float(fixed_sigma_f)
 
-    sigma_f, ell, ok = _fit_hyperparameters_2d(
+    from .fitting_2d import fit_hyperparameters, numerical_jitter, training_covariance
+    sigma_f, ell, extra_noise, ok, optimization = fit_hyperparameters(
         X, y, noise_cov, ell_init, ell_upper, sigma_f_init,
         fixed_lengthscale, fixed_sigma_f, optimize_hyperparams,
+        fit_extra_noise=fit_extra_noise, extra_noise_scale=extra_noise_scale,
+        sigma_f_max=sigma_f_max,
     )
     if verbose:
         hyperparameters = (
             f"hyperparams: sigma_f={sigma_f:.4f} {energy_unit}  "
             f"ell=({ell[0]:.3f} {cv_units[0]}, {ell[1]:.3f} {cv_units[1]})"
         )
-        print(hyperparameters + ("" if ok else "  [fit FAILED -> initial estimates]"))
+        print(hyperparameters)
+        print(f"Extra gradient SD: {extra_noise}; amplitude cap: {sigma_f_max}")
+        if optimization["bound_hits"]:
+            print("Hyperparameter bounds reached: " + ", ".join(optimization["bound_hits"]))
 
     # Train
     Kgg = _k_grad_grad(X, X, sigma_f, ell)
-    Ky = _with_relative_diagonal_jitter(Kgg + noise_cov)
+    Ky = training_covariance(Kgg, noise_cov, y, extra_noise)
+    jitter = numerical_jitter(noise_cov, y)
+    observation_noise = noise_cov + np.diag(np.tile(extra_noise**2, N))
     L, low = cho_factor(Ky, lower=True)
     alpha = cho_solve((L, low), y)
 
@@ -795,6 +738,13 @@ def reconstruct_pmf_2d(
         "grad": grad, "grad_err": grad_err, "gradient_noise_cov": noise_cov,
         "mean_covariances": mean_covariances,
         "covariance_batch_sizes": covariance_batch_sizes,
+        "covariance_block_size": covariance_block_size,
+        "extra_noise": extra_noise,
+        "extra_noise_scale": optimization["extra_noise_scale"],
+        "observation_noise_cov": observation_noise,
+        "numerical_jitter": jitter,
+        "jitter_policy": "fixed_sampling_and_data_scale",
+        "optimization": optimization,
         "tau": tau, "n_eff": n_eff,
         "sigma_f": sigma_f, "lengthscale": ell, "fit_ok": ok,
         "gx": gx, "gy": gy, "GX": GX, "GY": GY,
@@ -854,6 +804,21 @@ def reconstruct_pmf_2d(
         results["pmf_path"] = pmf_path
         if verbose:
             print(f"wrote {pmf_path}")
+
+    if save_outputs:
+        import json
+        metadata_path = os.path.join(out, f"{output_prefix}_fit_metadata.json")
+        metadata = dict(
+            cv_names=cv_names, cv_units=cv_units, energy_unit=energy_unit,
+            sigma_f=sigma_f, lengthscale=ell.tolist(), extra_noise=extra_noise.tolist(),
+            covariance_block_size=covariance_block_size,
+            covariance_batch_sizes=covariance_batch_sizes.tolist(),
+            jitter_policy=results["jitter_policy"],
+            numerical_jitter_max=float(jitter.max()),
+            loo_calibration_factor=cal_factor, optimization=optimization,
+        )
+        Path(metadata_path).write_text(json.dumps(metadata, indent=2) + "\n")
+        results["fit_metadata_path"] = metadata_path
 
     if plot:
         from .plotting_2d import plot_pmf_2d

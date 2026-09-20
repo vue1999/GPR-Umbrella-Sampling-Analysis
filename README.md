@@ -191,6 +191,59 @@ Run the self-contained synthetic check with:
 python examples/run_synthetic_2d_demo.py
 ```
 
+### Sampling blocks and additional force uncertainty
+
+The 2D fitter separates three quantities: the covariance estimated from each
+trajectory, optional unresolved window-to-window force scatter, and small
+numerical diagonal regularization.
+
+```python
+res = reconstruct_pmf_2d(
+    colvar_dir="COLVAR",
+    covariance_block_size=4000,  # saved frames: 10 ps if frames are 2.5 fs apart
+    fit_extra_noise=True,
+    # extra_noise_scale=(scale_cv0, scale_cv1),  # optional energy/CV units
+    # sigma_f_max=...,                         # optional energy-unit cap
+)
+```
+
+Equivalent CLI options are `--covariance-block-size 4000 --fit-extra-noise`,
+with optional `--extra-noise-scale SCALE0 SCALE1` and `--sigma-f-max VALUE`.
+No system-specific block time, gradient scale, or energy cap is hard-coded.
+
+- `covariance_block_size=None` keeps autocorrelation-adaptive blocks. An
+  explicit size uses nonoverlapping blocks, retains the full 2×2 covariance,
+  and requires at least four complete blocks per window. A trailing incomplete
+  block is excluded from the covariance estimate; all frames still determine
+  the mean force. Compare several block sizes: a short CV autocorrelation
+  time is not proof that a slow surrounding configuration has equilibrated.
+- `fit_extra_noise=False` retains the sampling-only statistical model. When
+  enabled, two independent gradient standard deviations are fitted in the
+  likelihood, one per CV. Their half-normal prior scales default to each
+  component's RMS measured gradient including its sampling variance. Explicit
+  positive scales may be supplied in energy/CV units. These scales transform
+  with the physical units. Extra noise describes residual inconsistency;
+  it does not correct biased sampling or establish equilibrium.
+- Numerical jitter is fixed from the input sampling variance, with a tiny
+  data-derived fallback for zero-variance components. It does not increase
+  with fitted signal amplitude or fitted discrepancy. The same covariance is
+  used for the objective, posterior and leave-one-window-out diagnostics.
+- Optimization uses analytic derivatives and six dimensionless multistart
+  initializations. Complete optimizer failure raises an error rather than
+  returning a silently substituted initial estimate.
+- `sigma_f_max=None` means **no additional amplitude cap**. Broad numerical
+  search bounds remain, derived from the data as before. A user-supplied cap
+  is an explicit prior constraint in energy units; it is validated and
+  recorded. No automatic cap is inferred from a guessed reaction barrier.
+
+Results retain `gradient_noise_cov` for sampling covariance and separately
+provide `extra_noise`, `observation_noise_cov`, `numerical_jitter` and
+`optimization`. The standard diagnostics report the block setting and fitted
+extra noise; `*_fit_metadata.json` records all starts, prior scales, bounds and
+bound hits. LOO scaling remains available but is a post-fit diagnostic, not a
+replacement for modeling force noise in the likelihood. It holds fitted
+hyperparameters fixed and does not test independently repeated configurations.
+
 ### Path analysis and path-aligned marginal PMFs
 
 #### At a glance
