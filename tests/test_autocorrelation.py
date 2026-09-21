@@ -1,7 +1,7 @@
 """Unit tests for the autocorrelation time estimator."""
 import numpy as np
 
-from gpr_umbrella.integration_1d import compute_tau_int
+from gpr_umbrella_1d.gpr import compute_tau_int
 
 
 class TestComputeTauInt:

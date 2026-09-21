@@ -2,16 +2,12 @@
 
 from importlib.metadata import version as _pkg_version, PackageNotFoundError
 
-from .integration_1d import reconstruct_pmf_1d
+from gpr_umbrella_1d.gpr import gpr_umbrella_integration as reconstruct_pmf_1d
 from .integration_2d import reconstruct_pmf_2d
-from .pathways import find_lowest_barrier_path
-from .support import sampled_support_mask
 
 __all__ = [
     "reconstruct_pmf_1d",
     "reconstruct_pmf_2d",
-    "find_lowest_barrier_path",
-    "sampled_support_mask",
 ]
 
 try:

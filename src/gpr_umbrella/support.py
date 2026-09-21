@@ -1,4 +1,4 @@
-"""Sampled-support geometry shared by 2D reconstruction and pathways."""
+"""Sampled-region geometry and display limits for 2D reconstruction."""
 from __future__ import annotations
 
 import numpy as np
@@ -108,23 +108,3 @@ def window_anchored_display_policy(results: dict) -> dict:
         "pmf_limits": (-padding, span + padding),
         "uncertainty_limits": uncertainty_limits,
     }
-
-
-def path_valid_mask(results: dict, display_policy: dict | None = None) -> np.ndarray:
-    """Return finite, geometrically supported, non-warning PMF cells."""
-    display = (
-        window_anchored_display_policy(results)
-        if display_policy is None else display_policy
-    )
-    lower, upper = display["pmf_limits"]
-    tolerance = 1e-12 * max(1.0, abs(lower), abs(upper))
-    pmf = np.asarray(display["pmf"], dtype=float)
-    support = np.asarray(results["support_mask"], dtype=bool)
-    if pmf.shape != support.shape:
-        raise ValueError("PMF and support mask must have matching shapes")
-    return (
-        support
-        & np.isfinite(pmf)
-        & (pmf >= lower - tolerance)
-        & (pmf <= upper + tolerance)
-    )

@@ -9,7 +9,7 @@ import os
 import numpy as np
 import pytest
 
-from gpr_umbrella.integration_1d import reconstruct_pmf_1d
+from gpr_umbrella_1d.gpr import gpr_umbrella_integration as reconstruct_pmf_1d
 
 
 def _generate_synthetic_colvar_data(tmpdir: str, n_windows: int = 15):

@@ -4,7 +4,7 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from gpr_umbrella.integration_1d import load_window_data
+from gpr_umbrella_1d.gpr import load_window_data
 from gpr_umbrella.integration_2d import load_plumed_colvar_2d
 
 

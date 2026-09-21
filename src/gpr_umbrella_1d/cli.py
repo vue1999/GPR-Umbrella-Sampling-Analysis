@@ -3,7 +3,7 @@ from __future__ import annotations
 import argparse
 import sys
 
-from .integration_1d import reconstruct_pmf_1d
+from .gpr import gpr_umbrella_integration
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -63,7 +63,7 @@ def main() -> int:
     args = parser.parse_args()
 
     try:
-        results = reconstruct_pmf_1d(
+        results = gpr_umbrella_integration(
             data_folder=args.data_folder,
             colvar_dir=args.colvar_dir,
             kappa=args.kappa,

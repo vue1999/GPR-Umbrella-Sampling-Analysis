@@ -2,13 +2,8 @@
 from __future__ import annotations
 
 import argparse
-from pathlib import Path
-
-import numpy as np
 
 from .integration_2d import reconstruct_pmf_2d
-from .pathways import find_lowest_barrier_path, save_lowest_barrier_path
-from .plotting_2d import plot_lowest_barrier_path
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -52,7 +47,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--restrict-to-sampled-support",
         action=argparse.BooleanOptionalAction,
         default=True,
-        help="Restrict plots and path analysis to the union of kernel-scaled "
+        help="Restrict plots to the union of kernel-scaled "
              "neighborhoods around sampled window means (default: enabled)",
     )
     p.add_argument(
@@ -66,28 +61,6 @@ def build_parser() -> argparse.ArgumentParser:
                    help="Skip the PMF + uncertainty figure")
     p.add_argument("--no-diagnostics", action="store_true",
                    help="Skip the 8-panel sampling/fit diagnostics figure")
-    p.add_argument("--find-lowest-barrier-path", action="store_true",
-                   help="Find the exact minimum-PMF-range grid path")
-    p.add_argument("--path-endpoints", type=float, nargs=4, default=None,
-                   metavar=("X0", "Y0", "X1", "Y1"),
-                   help="Required search-mode endpoint coordinates; snap to "
-                        "the nearest grid cells and reject them if invalid")
-    p.add_argument(
-        "--path-mode", choices=("search", "corridor", "fixed"), default="search",
-        help="Free grid search, corridor search, or direct reference-path evaluation",
-    )
-    p.add_argument(
-        "--path-reference", default=None, metavar="FILE",
-        help="Text file whose first two columns define the reference trajectory",
-    )
-    p.add_argument(
-        "--path-corridor-radius", type=float, default=None, metavar="RADIUS",
-        help="Corridor radius in dimensionless path-metric units",
-    )
-    p.add_argument("--path-metric-scales", type=float, nargs=2, default=None,
-                   metavar=("SCALE0", "SCALE1"),
-                   help="Positive scale for each CV when defining path length "
-                        "(default: fitted GP lengthscales)")
     p.add_argument("--quiet", action="store_true")
     return p
 
@@ -95,28 +68,7 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv=None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
-    path_requested = args.find_lowest_barrier_path
-    if path_requested and args.path_mode == "search" and args.path_endpoints is None:
-        parser.error("--path-mode search requires --path-endpoints")
-    if args.path_mode != "search" and args.path_reference is None:
-        parser.error("--path-mode corridor/fixed requires --path-reference FILE")
-    if args.path_mode == "corridor" and args.path_corridor_radius is None:
-        parser.error("--path-mode corridor requires --path-corridor-radius")
-    if args.path_mode == "search" and args.path_reference is not None:
-        parser.error("--path-reference requires --path-mode corridor or fixed")
-    if args.path_mode != "corridor" and args.path_corridor_radius is not None:
-        parser.error("--path-corridor-radius requires --path-mode corridor")
-    if args.path_mode != "search" and args.path_endpoints is not None:
-        parser.error("corridor/fixed modes use the reference trajectory endpoints")
-    reference_path = None
-    if args.path_reference is not None:
-        try:
-            reference_path = np.loadtxt(
-                args.path_reference, comments="#", usecols=(0, 1), ndmin=2,
-            )
-        except (OSError, ValueError) as exc:
-            parser.error(f"cannot read --path-reference: {exc}")
-    results = reconstruct_pmf_2d(
+    reconstruct_pmf_2d(
         colvar_dir=args.colvar_dir,
         kappa_dir=args.kappa_dir,
         cv_cols=tuple(args.cv_cols),
@@ -143,32 +95,6 @@ def main(argv=None) -> int:
         plot_diagnostics=not args.no_diagnostics,
         verbose=not args.quiet,
     )
-    if path_requested:
-        path_result = find_lowest_barrier_path(
-            results,
-            endpoints=(args.path_endpoints[:2], args.path_endpoints[2:])
-            if args.path_endpoints else None,
-            metric_scale=args.path_metric_scales,
-            reference_path=reference_path,
-            path_mode=args.path_mode,
-            corridor_radius=args.path_corridor_radius,
-        )
-        pmf_file = Path(results["pmf_path"])
-        prefix = pmf_file.name.removesuffix("_pmf_2d.dat")
-        path_file = pmf_file.with_name(f"{prefix}_lowest_barrier_path.dat")
-        save_lowest_barrier_path(path_result, str(path_file))
-        if not args.no_plot:
-            plot_lowest_barrier_path(
-                results, path_result,
-                output_path=str(path_file.with_suffix(".png")),
-                output_prefix=prefix,
-            )
-        if not args.quiet:
-            print(f"Endpoint-to-maximum rise: {path_result['endpoint_to_max']:.3f} "
-                  f"+/- {path_result['endpoint_to_max_err']:.3f} {args.energy_unit}")
-            print(f"Path energy range: {path_result['energy_range']:.3f} "
-                  f"+/- {path_result['energy_range_err']:.3f} {args.energy_unit}")
-            print(f"wrote {path_file}")
     return 0
 
 

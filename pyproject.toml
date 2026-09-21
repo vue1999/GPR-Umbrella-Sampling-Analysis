@@ -25,7 +25,7 @@ dependencies = [
 ]
 
 [project.scripts]
-gpr-umbrella = "gpr_umbrella.cli_1d:main"
+gpr-umbrella = "gpr_umbrella_1d.cli:main"
 gpr-umbrella-2d = "gpr_umbrella.cli_2d:main"
 
 [project.optional-dependencies]

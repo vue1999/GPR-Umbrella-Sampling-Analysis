@@ -52,7 +52,7 @@ from gpr_umbrella_1d import (
 )
 ```
 
-`gpr_umbrella_integration` forwards to `reconstruct_pmf_1d`; the existing
+`reconstruct_pmf_1d` is an alias for `gpr_umbrella_integration`; the existing
 `gpr-umbrella` command remains unchanged.
 
 ## 2D reconstruction
@@ -140,79 +140,22 @@ compare block sizes and independent samples to assess those limitations.
 
 ### Support and display
 
-The existing shared support/display policy is preserved:
+Plots show the union of ellipses at sampled means, with semiaxes
+`support_radius * lengthscale` (`support_radius=0.5` by default). Unsupported
+regions are blank. The colour interval spans PMFs at window means plus a 25%
+margin; supported values outside that interval are red. These are display
+choices, not changes to the reconstructed surface or a guarantee of sampling
+quality. `--no-restrict-to-sampled-support` shows the full rectangle.
 
-- Geometric support is the union of ellipses at sampled means, with semiaxes
-  `support_radius * lengthscale`; `support_radius=0.5` by default.
-- The ordinary colour interval spans PMFs at window means plus a 25% margin.
-  Unsupported regions are blank; supported values outside that interval are red.
-- Paths require finite PMF, geometric support and the ordinary colour interval.
-  There is no additional uncertainty threshold and no bridging of support gaps.
+The result includes `_gp_state` for posterior evaluation;
+`gpr_umbrella.integration_2d.posterior_covariance_2d(surface, points)` returns
+latent free-energy covariance, or cross covariance with an optional second set
+of points. Free-energy differences require the correlated variance
+`var(Fa) + var(Fb) - 2*cov(Fa, Fb)`. Reaction paths and barrier definitions belong
+to downstream analysis. GP errors condition on the fitted parameters and data;
+they do not measure equilibration or uncertainty in the choice of reaction path.
 
-`--no-restrict-to-sampled-support` restores rectangular geometric support but
-retains the colour-interval validity check. `--support-radius R` changes the
-neighborhood size. Support depends on fitted lengthscales and window spacing.
-
-## Path analysis
-
-Reconstruct first, then call the standalone path function:
-
-```python
-from gpr_umbrella import find_lowest_barrier_path
-from gpr_umbrella.pathways import save_lowest_barrier_path
-from gpr_umbrella.plotting_2d import plot_lowest_barrier_path
-
-path = find_lowest_barrier_path(
-    surface, path_mode="fixed", reference_path=reference_xy,
-)
-save_lowest_barrier_path(path, "path.dat")
-plot_lowest_barrier_path(surface, path, output_path="path.png")
-```
-
-Three modes share profile evaluation and covariance-aware uncertainty:
-
-| Mode | Required input | Behavior |
-|---|---|---|
-| `fixed` | `reference_path` | Evaluate the supplied curve; preserve vertices and endpoints; reject unsupported segments |
-| `search` | `endpoints=((x0,y0),(x1,y1))` | Find the minimum-energy-range supported grid path |
-| `corridor` | `reference_path`, `corridor_radius` | Run the same search within a corridor around the curve |
-
-Search endpoints snap to the nearest grid points, which must be valid; they do
-not move to local minima or umbrella centres. Requested and snapped endpoints
-are recorded. Corridor mode uses the reference endpoints. The search minimizes
-`max(F) - min(F)` exactly on the supported eight-neighbor graph; a deterministic
-gradient-aligned tie-break selects a representative within the optimal interval.
-It does not minimize only the highest energy or an uncertainty-penalized score.
-
-The default path metric scales each CV by its fitted GP lengthscale. Override
-with `metric_scale=(scale0, scale1)`; arc length and corridor radius are
-dimensionless in that metric. A reference curve need not pass through windows,
-but it must lie inside the supported region. No smoothing changes that curve.
-
-Both quantities are reported explicitly in energy units:
-
-- `energy_range = max(F) - min(F)` along the path.
-- `endpoint_to_max = max(F) - F(start)` for the forward endpoint rise.
-
-Each has `_err_raw`, `_err_calibrated` and configured `_err` values, using full
-GP covariance for free-energy differences. These uncertainties condition on the
-chosen path, fitted parameters and its selected extrema; they do not marginalize
-over alternative paths or transition-state locations.
-
-```bash
-gpr-umbrella-2d --colvar-dir COLVAR --fit-extra-noise \
-    --find-lowest-barrier-path --path-mode fixed --path-reference curve.dat
-```
-
-For search use `--path-mode search --path-endpoints X0 Y0 X1 Y1`; for a corridor
-use `--path-mode corridor --path-reference curve.dat --path-corridor-radius R`.
-Path tables include compact JSON metadata in their comment header.
-
-## Migration and citation
-
-See [MIGRATION.md](MIGRATION.md) for changes from the full experimental branch.
-Projected-arclength MBAR/GPR and transverse marginalization remain preserved on
-`codex/noise-aware-2d` at `2d03bc3`, outside this package's current scope.
+## Citation
 
 Please cite T. Stecher, N. Bernstein and G. Csányi, *J. Chem. Theory Comput.*
 **2014**, 10, 4079–4097, [doi:10.1021/ct500438v](https://doi.org/10.1021/ct500438v).

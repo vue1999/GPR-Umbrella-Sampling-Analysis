@@ -1,4 +1,4 @@
-"""Focused numerical tests for the two-dimensional GP covariance path."""
+"""Focused numerical tests for the two-dimensional GP covariance."""
 
 from __future__ import annotations
 
@@ -6,10 +6,10 @@ import numpy as np
 import pytest
 
 import gpr_umbrella.integration_2d as integration_2d
+from gpr_umbrella.support import sampled_support_mask
 from gpr_umbrella.fitting_2d import objective, force_scales, training_covariance
 
 from gpr_umbrella.integration_2d import (
-    _grid_support_mask,
     _gradient_noise_covariance,
     _k_f_grad,
     _k_grad_grad,
@@ -217,7 +217,7 @@ def test_rank_deficient_window_geometry_is_supported_locally() -> None:
     ])
     query = np.array([[0.5, 0.5], [0.0, 1.1]])
 
-    mask = _grid_support_mask(
+    mask = sampled_support_mask(
         query,
         training,
         lengthscale=np.array([1.0, 1.0]),
@@ -242,10 +242,6 @@ def test_reconstruction_uses_sampled_neighborhoods_by_default() -> None:
     np.testing.assert_allclose(results["support_ellipse_semiaxes"], (0.4, 0.55))
     assert np.any(results["support_mask"])
     assert np.any(~results["support_mask"])
-    assert np.all(results["path_valid_mask"] <= results["support_mask"])
-    assert results["path_valid_kind"] == (
-        "sampled_support_and_window_anchored_pmf_range"
-    )
     reference = results["_gp_state"]["pmf_reference_index"]
     assert results["support_mask"].ravel()[reference]
     assert results["pmf"].ravel()[reference] == pytest.approx(0.0, abs=1e-14)
@@ -459,7 +455,7 @@ def test_pmf_reference_is_lowest_point_within_support(monkeypatch) -> None:
         return support
 
     monkeypatch.setattr(
-        integration_2d, "_grid_support_mask", one_supported_grid_point
+        integration_2d, "sampled_support_mask", one_supported_grid_point
     )
     results = reconstruct_pmf_2d(
         data=_small_correlated_data(),

@@ -1,9 +1,8 @@
 """Two-dimensional GPR umbrella integration.
 
 Generalizes the 1D umbrella-integration scheme in
-:mod:`gpr_umbrella.integration_1d`
-to a separable-bias multi-CV setup, e.g. the H-H distance x relative-z 2D
-umbrella sampling in ``desorption_2dUS``.
+:mod:`gpr_umbrella_1d.gpr`
+to two CVs with separate harmonic restraints.
 
 Method
 ------
@@ -40,17 +39,13 @@ from .fitting_2d import (
     fit_hyperparameters, numerical_jitter, training_covariance,
 )
 
-from .integration_1d import (
+from gpr_umbrella_1d.gpr import (
     _extract_window_index,
     _kj_per_mol_to_energy_factor,
     compute_tau_int,
 )
 
-from .support import (
-    path_valid_mask as build_path_valid_mask,
-    sampled_support_mask,
-    window_anchored_display_policy,
-)
+from .support import sampled_support_mask
 
 # ---------------------------------------------------------------------------
 # Data loading (2D PLUMED COLVAR + per-window centre/kappa files)
@@ -67,7 +62,7 @@ def load_plumed_colvar_2d(
 
     Expects per window:
       * ``COLVAR_window_<i>.dat`` with columns ``time, cv0, cv1`` (cols set by
-        *cv_cols*), written by ``ui_md_umbrella_2d.py``.
+        *cv_cols*).
       * ``window_centers_kappa_<i>.txt`` (searched in *kappa_dir*, or alongside
         the COLVAR files) with one data line
         ``c0, c1, kappa0, kappa1``.
@@ -259,16 +254,6 @@ def _gradient_noise_covariance(
     return noise_cov, np.asarray(mean_covariances), np.asarray(batch_sizes)
 
 
-def _grid_support_mask(
-    points: np.ndarray,
-    training_points: np.ndarray,
-    lengthscale: np.ndarray,
-    radius: float,
-) -> np.ndarray:
-    """Mark the union of kernel-scaled neighborhoods of sampled means."""
-    return sampled_support_mask(points, training_points, lengthscale, radius)
-
-
 def posterior_covariance_2d(
     results: dict,
     Xa: np.ndarray,
@@ -279,7 +264,7 @@ def posterior_covariance_2d(
     """Posterior covariance between arbitrary points on a fitted 2D surface.
 
     Only the requested ``len(Xa) x len(Xb)`` matrix is formed.  This is used by
-    pathway error propagation without retaining a full grid-grid covariance.
+    free-energy difference errors without retaining a full grid-grid covariance.
     """
     state = results.get("_gp_state")
     if state is None:
@@ -378,7 +363,7 @@ def reconstruct_pmf_2d(
     gradients are interpreted in ``energy_unit / cv_units[d]²`` and
     ``energy_unit / cv_units[d]``, respectively.
 
-    By default plots and path analysis are restricted
+    By default plots are restricted
     to the union of kernel-scaled neighborhoods around sampled window means.
     ``support_radius`` gives the radius in GP lengthscales.
 
@@ -389,8 +374,6 @@ def reconstruct_pmf_2d(
     including sampling variance). ``sigma_f_max`` optionally limits the GP
     amplitude in energy units; no additional cap is imposed by default.
     Numerical jitter is fixed from the data, independent of fitted parameters.
-    Path analysis is a separate operation: pass the returned surface to
-    :func:`gpr_umbrella.pathways.find_lowest_barrier_path`.
     """
     if (colvar_dir is None) == (data is None):
         raise ValueError("Provide exactly one of colvar_dir or data.")
@@ -561,7 +544,7 @@ def reconstruct_pmf_2d(
     GX, GY = np.meshgrid(gx, gy, indexing="ij")
     Xs = np.column_stack([GX.ravel(), GY.ravel()])
     if restrict_to_sampled_support:
-        support_mask = _grid_support_mask(Xs, X, ell, support_radius)
+        support_mask = sampled_support_mask(Xs, X, ell, support_radius)
     else:
         support_mask = np.ones(len(Xs), dtype=bool)
     supported_indices = np.flatnonzero(support_mask)
@@ -669,14 +652,6 @@ def reconstruct_pmf_2d(
         },
     }
 
-    # Plotting and pathfinding consume the same observation-anchored policy.
-    display_policy = window_anchored_display_policy(results)
-    valid_mask = build_path_valid_mask(results, display_policy)
-    results["path_valid_mask"] = valid_mask
-    results["path_valid_kind"] = (
-        "sampled_support_and_window_anchored_pmf_range"
-    )
-
     if output_prefix is None:
         output_prefix = (os.path.basename(base_dir) if base_dir not in (None, ".")
                          else "gpr_2d")
@@ -687,13 +662,12 @@ def reconstruct_pmf_2d(
     if save_outputs:
         flat = np.column_stack([GX.ravel(), GY.ravel(),
                                 pmf.ravel(), pmf_std_raw,
-                                pmf_std_calibrated, support_mask.astype(int),
-                                valid_mask.ravel().astype(int)])
+                                pmf_std_calibrated, support_mask.astype(int)])
         pmf_path = os.path.join(out, f"{output_prefix}_pmf_2d.dat")
         np.savetxt(pmf_path, flat,
                    header=f"{cv_names[0]}({cv_units[0]}) {cv_names[1]}({cv_units[1]}) "
                           f"PMF({energy_unit}) sigma_raw({energy_unit}) "
-                          f"sigma_calibrated({energy_unit}) supported path_valid",
+                          f"sigma_calibrated({energy_unit}) supported",
                    fmt="%.6f")
         results["pmf_path"] = pmf_path
         if verbose:

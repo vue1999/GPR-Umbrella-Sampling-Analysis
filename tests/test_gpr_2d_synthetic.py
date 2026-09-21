@@ -7,12 +7,10 @@ the truth to within a tolerance after aligning the additive constant.
 import numpy as np
 import pytest
 
-from gpr_umbrella import reconstruct_pmf_2d, find_lowest_barrier_path
-from gpr_umbrella.pathways import save_lowest_barrier_path
+from gpr_umbrella import reconstruct_pmf_2d
 from gpr_umbrella.support import window_anchored_display_policy
 from gpr_umbrella.plotting_2d import (
     plot_diagnostics_2d,
-    plot_lowest_barrier_path,
     plot_pmf_2d,
 )
 
@@ -50,16 +48,6 @@ def test_2d_pmf_and_saddle_recovery(synthetic_fit):
     interior = np.abs(gx) < .9
     x_peak = gx[interior][np.argmax(pred[interior, np.argmin(np.abs(gy))])]
     assert abs(x_peak) < .6
-
-
-def test_standalone_path_recovers_saddle_and_saves(synthetic_fit, tmp_path):
-    path = find_lowest_barrier_path(synthetic_fit, endpoints=((-1., -.5), (1., .6)))
-    assert abs(path["ts_xy"][0]) < .5
-    assert .7 < path["energy_range"] < 1.2
-    data_file, image_file = tmp_path / "path.dat", tmp_path / "path.png"
-    save_lowest_barrier_path(path, str(data_file))
-    plot_lowest_barrier_path(synthetic_fit, path, output_path=str(image_file))
-    assert data_file.is_file() and image_file.stat().st_size > 0
 
 
 def test_diagnostics_keep_all_sampling_and_model_panels(synthetic_fit, tmp_path):
@@ -164,25 +152,4 @@ def test_2d_plots_mark_gp_observations_at_sampled_means():
     )
     np.testing.assert_allclose(
         np.column_stack([force_quiver.X, force_quiver.Y]), res["means"]
-    )
-
-    path = find_lowest_barrier_path(res, endpoints=((-1., -.5), (1., .6)))
-    path_fig = plot_lowest_barrier_path(res, path)
-    path_ax = next(
-        ax for ax in path_fig.axes if ax.get_title() == "Exact minimum-range grid path"
-    )
-    np.testing.assert_allclose(
-        _scatter_offsets(path_ax, "sampled means (GP observations)"),
-        res["means"],
-    )
-    path_lines = [
-        line for line in path_ax.lines
-        if line.get_label() == "minimum-range path"
-    ]
-    assert len(path_lines) == 1
-    np.testing.assert_allclose(
-        path_lines[0].get_xdata(), path["x"]
-    )
-    np.testing.assert_allclose(
-        path_lines[0].get_ydata(), path["y"]
     )
