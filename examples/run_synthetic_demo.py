@@ -11,7 +11,7 @@ from pathlib import Path
 
 import numpy as np
 
-from gpr_umbrella_1d import gpr_umbrella_integration
+from gpr_umbrella import reconstruct_pmf_1d
 
 
 HERE = Path(__file__).resolve().parent
@@ -46,7 +46,7 @@ def make_data(n_windows: int = 15, n_samples: int = 5000, seed: int = 12345):
 
 if __name__ == "__main__":
     kappa, centers_file = make_data()
-    results = gpr_umbrella_integration(
+    results = reconstruct_pmf_1d(
         colvar_dir=str(COLVAR_DIR),
         kappa=kappa,
         centers=str(centers_file),

@@ -1,137 +1,164 @@
-# GPR Umbrella Integration (1D)
+# GPR umbrella integration
 
-Gaussian process regression (GPR) based umbrella integration for 1D PLUMED umbrella sampling outputs. This package implements the method described in
+Reconstruct one- or two-dimensional free-energy surfaces from harmonic umbrella
+sampling using Gaussian processes conditioned on window mean forces. The method
+is based on [Stecher, Bernstein and Csányi (2014)](https://doi.org/10.1021/ct500438v).
+The fitted free energy is defined up to an additive constant.
 
-> T. Stecher, N. Bernstein, and G. Csányi, "Free Energy Surface Reconstruction from Umbrella Samples Using Gaussian Process Regression," *J. Chem. Theory Comput.* **2014**, *10* (9), 4079–4097. [doi:10.1021/ct500438v](https://doi.org/10.1021/ct500438v)
-
-and is tailored to PLUMED `window_*.ui_dat` files. Specifically, it implements the
-gradient-based reconstruction variant referred to as **GPR(d)** in that paper:
-mean forces are estimated per umbrella window (Sec. 2.3, eq 15), their statistical
-noise is propagated into the likelihood (Sec. 4, eq 37), and the free-energy profile
-is reconstructed by GPR on the derivative observations using a (periodic) squared-exponential
-kernel (Sec. 4–4.1).
-
-## Features
-
-- Computes mean force and uncertainty from umbrella windows
-- Estimates autocorrelation time for effective sample size
-- Optimizes GP hyperparameters by marginal likelihood
-- Produces PMF and derivative predictions with uncertainties
-- Generates a multi-panel diagnostics figure
-- Reads raw PLUMED COLVAR files directly (no preprocessing required)
-- Configurable units (energy, collective-variable axis)
-
-## Installation
+## Installation and examples
 
 ```bash
-pip install -e .
+pip install -e '.[test]'
+python examples/run_synthetic_demo.py
+python examples/run_synthetic_2d_demo.py
+pytest
 ```
 
-## Quick Start
+The examples generate known analytic surfaces without simulation input. The
+`examples/fe_h_desorption/` directory also contains a complete 1D COLVAR example.
+The package requires NumPy, SciPy and Matplotlib; pytest is a test dependency.
 
-### From COLVAR files
+## 1D reconstruction
 
-Supply a directory of `COLVAR_window_*.dat` files together with force-constant
-information.  For a single kappa shared across all windows, provide a centres
-file:
+```python
+from gpr_umbrella import reconstruct_pmf_1d
+
+result = reconstruct_pmf_1d(
+    colvar_dir="COLVAR", kappa=24.305, centers="window_centers.txt",
+    cv_unit="nm", energy_unit="eV", output_dir="outputs", show=False,
+)
+```
+
+Use `kappa_dir="window_kappa"` instead of `kappa`/`centers` for per-window
+restraints, or `data_folder="processed"` for `window_*.ui_dat` files.
 
 ```bash
 gpr-umbrella --colvar-dir COLVAR --kappa 24.305 \
-             --centers window_centers.txt --cv-unit nm
+    --centers window_centers.txt --cv-unit nm
 ```
 
-Or from Python:
+COLVAR files are named `COLVAR_window_<i>.dat`; the CV column defaults to index
+1 after time. Per-window `window_centers_kappa_<i>.txt` files contain a centre
+and force constant. Processed `.ui_dat` files contain sample, centre and kappa;
+their kappa is interpreted in kJ/mol/CV². For raw COLVAR inputs, force constants
+use the requested energy unit unless `kappa_in_kj_per_mol=True` / `--kappa-kj`.
+
+Outputs are `*_pmf_gpr.dat`, `*_deriv_gpr.dat` and `*_gpr_analysis.png`.
+The original documented imports remain available:
 
 ```python
-from gpr_umbrella_1d import gpr_umbrella_integration
-
-results = gpr_umbrella_integration(
-    colvar_dir="COLVAR",
-    kappa=24.305,                    # eV/nm^2
-    centers="window_centers.txt",    # one centre per line
-    cv_unit="nm",
-    energy_unit="eV",
-    output_dir="outputs",
-    output_prefix="my_system",
-    show=False,
+from gpr_umbrella_1d import (
+    gpr_umbrella_integration, load_plumed_colvar_data, load_window_data,
 )
 ```
 
-If each window has its own kappa, point to a directory of per-window files
-instead:
+`reconstruct_pmf_1d` is an alias for `gpr_umbrella_integration`; the existing
+`gpr-umbrella` command remains unchanged.
 
-```bash
-gpr-umbrella --colvar-dir COLVAR --kappa-dir window_kappa/
-```
+## 2D reconstruction
 
-### From preprocessed window files
+Each window applies one separable harmonic restraint per CV. Its free-energy
+gradient estimate is `kappa * (centre - sampled_mean)`, evaluated at the sampled
+mean. A squared-exponential derivative GP reconstructs a scalar surface from
+these vector observations. Each coordinate has its own lengthscale and unit.
 
-```bash
-gpr-umbrella --data-folder /path/to/processed_data
-```
+Input files:
+
+- `COLVAR_window_<i>.dat`: time, CV0, CV1 (column indices configurable).
+- `window_centers_kappa_<i>.txt`: one data row `centre0 centre1 kappa0 kappa1`.
 
 ```python
-results = gpr_umbrella_integration(
-    data_folder="/path/to/processed_data",
-    output_dir="outputs",
-    output_prefix="my_system",
-    show=False,
+from gpr_umbrella import reconstruct_pmf_2d
+
+surface = reconstruct_pmf_2d(
+    colvar_dir="COLVAR", kappa_dir="COLVAR",
+    cv_names=("distance", "height"), cv_units=("A", "A"), energy_unit="eV",
+    fit_extra_noise=True, output_dir="outputs",
 )
 ```
 
-## Input Data Formats
-
-### COLVAR files
-
-Standard PLUMED `COLVAR_window_*.dat` files with columns for `time` and the
-collective variable.  The CV column index can be set with `--cv-col` (default 1).
-
-Force constant and window centres can be provided in two ways:
-
-1. **Single kappa** (`--kappa`) + a centres file (`--centers`) listing one
-   centre per line.
-2. **Per-window kappa directory** (`--kappa-dir`) containing
-   `window_centers_kappa_*.txt` files with `centre, kappa` on each data line.
-
-By default, kappa is expected in eV/CV_unit².  Pass `--kappa-kj` if values are
-in kJ/mol/CV_unit² (PLUMED convention).
-
-### window_*.ui_dat files
-
-Each file must contain at least three numeric columns:
-
-1. reaction coordinate samples
-2. window centre (constant per file)
-3. force constant kappa in kJ/mol/CV_unit² (constant per file)
-
-## Outputs
-
-- `*_pmf_gpr.dat`: reaction coordinate, PMF mean, PMF uncertainty
-- `*_deriv_gpr.dat`: reaction coordinate, mean force, mean force uncertainty
-- `*_gpr_analysis.png`: diagnostics figure
-
-## Example
-
-See `examples/fe_h_desorption/` for a complete example using COLVAR data from
-an Fe-surface H-desorption umbrella sampling simulation (36 windows with
-per-window force constants):
-
 ```bash
-cd examples/fe_h_desorption
-python run_gpr.py
+gpr-umbrella-2d --colvar-dir COLVAR --kappa-dir COLVAR \
+    --cv-names distance height --cv-units A A --fit-extra-noise
 ```
+
+For in-memory input, provide `data` instead of `colvar_dir`:
+
+```python
+surface = reconstruct_pmf_2d(data={
+    "centers": centers,          # shape (n_windows, 2)
+    "kappa": force_constants,    # shape (n_windows, 2)
+    "all_positions": trajectories,  # list of (n_frames, 2) arrays
+})
+```
+
+Window means, variances and sample counts are derived from trajectories. An
+optional `window_files` list supplies labels. Input arrays are not modified.
+Force constants are in `energy_unit / cv_units[d]²`; gradients are in
+`energy_unit / cv_units[d]`. Labels alone do not convert coordinate values.
+
+Outputs include the PMF grid, raw and calibrated uncertainty, support masks,
+fit metadata, a PMF/uncertainty figure, and the full diagnostic figure. The
+latter keeps its three-row layout: PMF and uncertainty; target-to-mean drift,
+mean-force field and autocorrelation; sampling ellipses, component LOO scores
+and their histogram. The header records lengthscales, amplitude, covariance
+blocks, additional noise and calibration. Use `--no-diagnostics` to skip it.
+
+### Sampling covariance and additional force noise
+
+The likelihood separates sampling covariance, optional unresolved force scatter,
+and numerical regularization:
+
+- Multivariate batch means retain the full within-window 2×2 covariance.
+  `covariance_block_size=None` uses autocorrelation-adaptive blocks. An explicit
+  size is in saved frames and requires at least four complete blocks/window.
+  A trailing incomplete block is omitted from covariance estimation; every
+  frame still contributes to the mean force.
+- `fit_extra_noise=True` fits a separate additional gradient standard deviation
+  for each CV. Half-normal prior scales default to the RMS observed gradients,
+  including sampling variance. `extra_noise_scale=(s0, s1)` overrides them in
+  energy/CV units. The default remains `fit_extra_noise=False`.
+- Numerical jitter is fixed from the data, independent of fitted amplitude or
+  additional noise. The objective, posterior and LOO use the same covariance.
+- Optimization uses analytic derivatives and six deterministic, dimensionless
+  starts. Only successful starts are eligible; complete failure raises an error.
+- `fixed_lengthscale=(ell0, ell1)` and `fixed_sigma_f=value` fix parameters.
+  `sigma_f_max=None` adds no amplitude cap. An explicit cap is validated and
+  recorded; broad data-scaled numerical bounds remain in either case.
+
+For example, `covariance_block_size=4000` means 10 ps if saved frames are 2.5 fs
+apart. The equivalent CLI flags are `--covariance-block-size 4000`,
+`--extra-noise-scale S0 S1`, `--lengthscales L0 L1` and `--sigma-f-max VALUE`.
+No block time, physical lengthscale or expected barrier is hard-coded.
+
+Results expose `gradient_noise_cov`, `extra_noise`, `observation_noise_cov`,
+`numerical_jitter` and `optimization`. `*_fit_metadata.json` records all starts,
+prior scales, bounds and bound hits. Whole-window LOO calibration is a post-fit
+diagnostic at fixed hyperparameters. Raw and calibrated errors remain available.
+Additional noise does not correct biased sampling or establish equilibration;
+compare block sizes and independent samples to assess those limitations.
+
+### Support and display
+
+Plots show the union of ellipses at sampled means, with semiaxes
+`support_radius * lengthscale` (`support_radius=0.5` by default). Unsupported
+regions are blank. The colour interval spans PMFs at window means plus a 25%
+margin; supported values outside that interval are red. These are display
+choices, not changes to the reconstructed surface or a guarantee of sampling
+quality. `--no-restrict-to-sampled-support` shows the full rectangle.
+
+The result includes `_gp_state` for posterior evaluation;
+`gpr_umbrella.integration_2d.posterior_covariance_2d(surface, points)` returns
+latent free-energy covariance, or cross covariance with an optional second set
+of points. Free-energy differences require the correlated variance
+`var(Fa) + var(Fb) - 2*cov(Fa, Fb)`. Reaction paths and barrier definitions belong
+to downstream analysis. GP errors condition on the fitted parameters and data;
+they do not measure equilibration or uncertainty in the choice of reaction path.
 
 ## Citation
 
-This implementation is based on the method introduced in:
-
-> T. Stecher, N. Bernstein, and G. Csányi, "Free Energy Surface Reconstruction from Umbrella Samples Using Gaussian Process Regression," *J. Chem. Theory Comput.* **2014**, *10* (9), 4079–4097. [doi:10.1021/ct500438v](https://doi.org/10.1021/ct500438v)
-
-If you use this tool in published work, please cite the paper above and acknowledge
-this implementation.
-
-A closely related follow-up paper extends the same GPR-based reconstruction to combined
-exploration + sampling (metadynamics biasing with an instantaneous-collective-force
-gradient estimator, reconstructed with GPR):
-
-> L. Mones, N. Bernstein, and G. Csányi, "Exploration, Sampling, And Reconstruction of Free Energy Surfaces with Gaussian Process Regression," *J. Chem. Theory Comput.* **2016**, *12* (10), 5100–5110. [doi:10.1021/acs.jctc.6b00553](https://doi.org/10.1021/acs.jctc.6b00553)
+Please cite T. Stecher, N. Bernstein and G. Csányi, *J. Chem. Theory Comput.*
+**2014**, 10, 4079–4097, [doi:10.1021/ct500438v](https://doi.org/10.1021/ct500438v).
+A related extension is L. Mones, N. Bernstein and G. Csányi, *J. Chem. Theory
+Comput.* **2016**, 12, 5100–5110,
+[doi:10.1021/acs.jctc.6b00553](https://doi.org/10.1021/acs.jctc.6b00553).

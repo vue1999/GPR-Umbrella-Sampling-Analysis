@@ -3,11 +3,11 @@
 Copy this file and edit the paths / parameters to match your data.
 Neither option below is runnable as-is -- update the paths first.
 """
-from gpr_umbrella_1d import gpr_umbrella_integration
+# from gpr_umbrella import reconstruct_pmf_1d
 
 # --- Option A: preprocessed window_*.ui_dat files ---
 # DATA_FOLDER = "/path/to/processed_data"
-# results = gpr_umbrella_integration(
+# results = reconstruct_pmf_1d(
 #     data_folder=DATA_FOLDER,
 #     output_dir="outputs",
 #     output_prefix="example_run",
@@ -19,7 +19,7 @@ from gpr_umbrella_1d import gpr_umbrella_integration
 # KAPPA = 24.305          # eV/nm^2 (set kappa_in_kj_per_mol=True if in kJ/mol)
 # CENTERS_FILE = "/path/to/window_centers.txt"  # one centre per line
 #
-# results = gpr_umbrella_integration(
+# results = reconstruct_pmf_1d(
 #     colvar_dir=COLVAR_DIR,
 #     kappa=KAPPA,
 #     centers=CENTERS_FILE,

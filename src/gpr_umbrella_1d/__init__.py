@@ -7,6 +7,6 @@ from .gpr import gpr_umbrella_integration, load_plumed_colvar_data, load_window_
 __all__ = ["gpr_umbrella_integration", "load_plumed_colvar_data", "load_window_data"]
 
 try:
-    __version__ = _pkg_version("gpr-umbrella-1d")
+    __version__ = _pkg_version("gpr-umbrella")
 except PackageNotFoundError:
     __version__ = "0.1.0"

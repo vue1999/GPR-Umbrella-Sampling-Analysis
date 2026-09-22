@@ -9,11 +9,11 @@ the repository light; the resulting PMF is essentially identical to the
 full-resolution run.
 """
 from pathlib import Path
-from gpr_umbrella_1d import gpr_umbrella_integration
+from gpr_umbrella import reconstruct_pmf_1d
 
 HERE = Path(__file__).resolve().parent
 
-results = gpr_umbrella_integration(
+results = reconstruct_pmf_1d(
     colvar_dir=str(HERE / "COLVAR"),
     kappa_dir=str(HERE / "window_kappa"),
     cv_col=1,
